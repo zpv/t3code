@@ -1,3 +1,4 @@
+import { usePolarisPaletteItems } from "../polaris/entry"; // polaris-fork: palette import
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
@@ -1260,6 +1261,7 @@ function OpenCommandPaletteDialog(props: {
   };
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+  actionItems.push(...usePolarisPaletteItems()); // polaris-fork: palette items
 
   if (projects.length > 0) {
     const activeProjectTitle =

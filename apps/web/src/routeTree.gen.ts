@@ -20,6 +20,7 @@ import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$proje
 import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
 import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
+import { Route as ChatPolarisRouteImport } from './routes/_chat.polaris'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as ThreadsEnvironmentIdThreadIdRouteImport } from './routes/threads.$environmentId.$threadId'
 import { Route as ChatSettingsWorktreesRouteImport } from './routes/_chat.settings.worktrees'
@@ -104,6 +105,11 @@ const ChatSettingsRoute = ChatSettingsRouteImport.update({
 const ChatPullRequestsRoute = ChatPullRequestsRouteImport.update({
   id: '/pull-requests',
   path: '/pull-requests',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatPolarisRoute = ChatPolarisRouteImport.update({
+  id: '/polaris',
+  path: '/polaris',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatNewRoute = ChatNewRouteImport.update({
@@ -276,6 +282,7 @@ export interface FileRoutesByFullPath {
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
   '/new': typeof ChatNewRoute
+  '/polaris': typeof ChatPolarisRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/settings': typeof ChatSettingsRouteWithChildren
   '/usage': typeof ChatUsageRoute
@@ -318,6 +325,7 @@ export interface FileRoutesByTo {
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
   '/new': typeof ChatNewRoute
+  '/polaris': typeof ChatPolarisRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/settings': typeof ChatSettingsRouteWithChildren
   '/usage': typeof ChatUsageRoute
@@ -363,6 +371,7 @@ export interface FileRoutesById {
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
   '/_chat/new': typeof ChatNewRoute
+  '/_chat/polaris': typeof ChatPolarisRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/settings': typeof ChatSettingsRouteWithChildren
   '/_chat/usage': typeof ChatUsageRoute
@@ -409,6 +418,7 @@ export interface FileRouteTypes {
     | '/pair'
     | '/welcome'
     | '/new'
+    | '/polaris'
     | '/pull-requests'
     | '/settings'
     | '/usage'
@@ -451,6 +461,7 @@ export interface FileRouteTypes {
     | '/pair'
     | '/welcome'
     | '/new'
+    | '/polaris'
     | '/pull-requests'
     | '/settings'
     | '/usage'
@@ -495,6 +506,7 @@ export interface FileRouteTypes {
     | '/pair'
     | '/welcome'
     | '/_chat/new'
+    | '/_chat/polaris'
     | '/_chat/pull-requests'
     | '/_chat/settings'
     | '/_chat/usage'
@@ -620,6 +632,13 @@ declare module '@tanstack/react-router' {
       path: '/pull-requests'
       fullPath: '/pull-requests'
       preLoaderRoute: typeof ChatPullRequestsRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/polaris': {
+      id: '/_chat/polaris'
+      path: '/polaris'
+      fullPath: '/polaris'
+      preLoaderRoute: typeof ChatPolarisRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/new': {
@@ -908,6 +927,7 @@ const ChatSettingsRouteWithChildren = ChatSettingsRoute._addFileChildren(
 
 interface ChatRouteChildren {
   ChatNewRoute: typeof ChatNewRoute
+  ChatPolarisRoute: typeof ChatPolarisRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatSettingsRoute: typeof ChatSettingsRouteWithChildren
   ChatUsageRoute: typeof ChatUsageRoute
@@ -918,6 +938,7 @@ interface ChatRouteChildren {
 
 const ChatRouteChildren: ChatRouteChildren = {
   ChatNewRoute: ChatNewRoute,
+  ChatPolarisRoute: ChatPolarisRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatSettingsRoute: ChatSettingsRouteWithChildren,
   ChatUsageRoute: ChatUsageRoute,

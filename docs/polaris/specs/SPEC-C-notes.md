@@ -1,0 +1,1 @@
+The upstream chat layout recognizes modal routes through `isAppModalPage`, which is outside the permitted seam list. Polaris owns its modal and close behavior and renders the previous thread beneath the sheet. Navigating to Polaris remounts that thread because retaining its existing component requires an additional upstream seam.

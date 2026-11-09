@@ -1,3 +1,4 @@
+import { PolarisSidebarButton } from "../../polaris/entry"; // polaris-fork: sidebar import
 import { ArrowLeftIcon, ArrowRightIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo } from "react";
@@ -278,6 +279,7 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               onClick={handlePullRequestsClick}
             />
           ) : null}
+          <PolarisSidebarButton /> {/* polaris-fork: sidebar button */}
           <SidebarUtilityItem
             icon={<ChartNoAxesColumnIcon />}
             label="Usage"
