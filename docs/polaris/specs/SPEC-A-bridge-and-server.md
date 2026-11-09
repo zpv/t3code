@@ -12,7 +12,7 @@ Build the T3 Code side of the Polaris integration:
    and implements the bridge API and the bridge→polarisd calls in `CONTRACT.md`.
 2. `apps/server/src/polaris/`: two authenticated HTTP routes on the T3 server, a session
    import with visible history and a reverse proxy to `polarisd`.
-3. Fork tooling: `docs/polaris/SEAMS.md`, `scripts/polaris/check-seams.ts`,
+3. Fork tooling: `docs/polaris/SEAMS.md`, `apps/polaris-bridge/scripts/check-seams.ts`,
    `docs/polaris/RUNBOOK.md`.
 
 ## Hard constraints
@@ -186,8 +186,8 @@ without buffering so `GET /v0/events/stream` (SSE) works. A down polarisd is `50
 - `docs/polaris/SEAMS.md`: a table of every edit to an upstream file: file, a unique
   marker string that must be present, and why. Format the table so the checker can
   parse it.
-- `scripts/polaris/check-seams.ts`: reads `SEAMS.md`, exits non-zero listing any file
-  whose marker is missing. Runnable as `node scripts/polaris/check-seams.ts`.
+- `apps/polaris-bridge/scripts/check-seams.ts`: reads `SEAMS.md`, exits non-zero listing any file
+  whose marker is missing. Runnable as `node apps/polaris-bridge/scripts/check-seams.ts`.
 - `docs/polaris/RUNBOOK.md`: how to run the fork server and bridge on the Polaris host
   beside an installed T3 Code (`T3CODE_HOME=~/.t3-polaris`, `T3CODE_PORT`,
   `T3CODE_TELEMETRY_ENABLED=false`, `T3CODE_DISABLE_AUTO_UPDATE`), how to mint the bridge
@@ -200,11 +200,11 @@ All must pass; report the exact output tail of each.
 
 1. `vp run --filter @t3tools/polaris-bridge typecheck` and `vp run --filter @t3tools/polaris-bridge test`.
 2. `vp run --filter t3 typecheck` and `vp test run apps/server/src/polaris`.
-3. `node scripts/polaris/check-seams.ts` exits 0, and exits non-zero when a marker is
+3. `node apps/polaris-bridge/scripts/check-seams.ts` exits 0, and exits non-zero when a marker is
    temporarily removed (show both).
 4. `git diff --stat main -- . ':!pnpm-lock.yaml'` shows no modified upstream file other
    than `apps/server/src/server.ts`.
-5. **Live smoke, free provider.** `node scripts/polaris/smoke.ts` (you write it):
+5. **Live smoke, free provider.** `node apps/polaris-bridge/scripts/smoke.ts` (you write it):
    starts `vp run dev --no-seed --home-dir <temp>` on its own ports, mints a token,
    starts a fake polarisd (an in-process HTTP server that records requests), starts the
    bridge, then through the bridge API: creates a thread on the `Replay (dev)` provider
@@ -214,7 +214,7 @@ All must pass; report the exact output tail of each.
    non-empty text, that `snapshot` output is non-empty, that a restart of the bridge
    emits no duplicate event, and that a thread created directly over RPC (not through
    the bridge) is adopted exactly once. It stops every process it started, by PID.
-6. **Live import, real provider, run once.** Write `scripts/polaris/smoke-import.ts`:
+6. **Live import, real provider, run once.** Write `apps/polaris-bridge/scripts/smoke-import.ts`:
    in a temp git repo with a linked worktree, create a real Claude Code session in the
    worktree (`claude -p --model haiku "Remember the code word: marmalade. Reply OK."`),
    import it through the bridge, assert the thread shows that user message, send

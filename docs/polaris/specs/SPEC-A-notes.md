@@ -1,0 +1,5 @@
+# Spec A: parser constraint
+
+Job 1 cannot fully meet the 400-message import requirement with the current shared parser interface in every Codex transcript. `AgentSessionScanner.parseAgentSessionTranscript` hard-codes a 200-message retention limit inside `parseAgentSessionRecords`. The fork batches around matching Codex prompt records to preserve the parser's duplicate handling, but a chain of overlapping matching-record dependencies can leave no safe boundary before that limit. It returns 409 rather than silently misrepresent history.
+
+The smallest direct fix is to let the exported parser take a retention limit (defaulting to the existing 200) and pass 400 from the Polaris importer. The limit must also reach `parseAgentSessionRecords` and its first-user/recent-history selection. This edits `apps/server/src/project/AgentSessionScanner.ts`, an upstream file outside the permitted `server.ts` seams. Spec A's hard constraints require stopping and recording the reason instead of making that edit. A fork-owned alternative would need to reproduce the shared parser's Codex deduplication, which the spec explicitly says not to copy.

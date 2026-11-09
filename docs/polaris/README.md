@@ -49,7 +49,7 @@ The same file is committed in `zpv/polaris` at `docs/T3_CONTRACT.md`; change bot
 | Bridge: headless WS RPC client of the T3 server, loopback HTTP API for `polarisd`  | `apps/polaris-bridge/` (new package)                             | none                                                                  |
 | Session import with visible history, and authenticated reverse proxy to `polarisd` | `apps/server/src/polaris/` (new files)                           | `apps/server/src/server.ts` (one layer entry per route)               |
 | Polaris panels in the web client (ports, tunnels, simulators, Brief)               | `apps/web/src/polaris/`, `apps/web/src/routes/_chat.polaris.tsx` | `apps/web/src/routes/__root.tsx` (one host line), optional nav button |
-| Fork tooling                                                                       | `scripts/polaris/`                                               | none                                                                  |
+| Fork tooling                                                                       | `apps/polaris-bridge/scripts/`                                   | none                                                                  |
 | Docs                                                                               | `docs/polaris/`                                                  | none                                                                  |
 
 ## Staying mergeable
@@ -59,7 +59,7 @@ Upstream lands about 150 commits a day. The rules that keep merges cheap:
 1. **`main` mirrors `upstream/main`.** Never commit to it. All fork work is on `polaris`.
 2. **Merge, do not rebase.** `git fetch upstream && git checkout main && git merge --ff-only upstream/main && git checkout polaris && git merge main`. Enable `git config rerere.enabled true`.
 3. **New code goes in new files.** Fork-owned paths are listed above and never conflict.
-4. **Every edit to an upstream file is a seam.** Keep it to one or two lines, mark it with a `polaris-fork` comment, and list it in [SEAMS.md](./SEAMS.md). `node scripts/polaris/check-seams.ts` fails when a seam listed there is missing, so a merge that silently drops one is caught.
+4. **Every edit to an upstream file is a seam.** Keep it to one or two lines, mark it with a `polaris-fork` comment, and list it in [SEAMS.md](./SEAMS.md). `node apps/polaris-bridge/scripts/check-seams.ts` fails when a seam listed there is missing, so a merge that silently drops one is caught.
 5. **Never edit the hot files:** `packages/contracts/src/rpc.ts`, `apps/server/src/ws.ts`, `packages/contracts/src/orchestrationV2.ts`, `apps/server/src/orchestration-v2/Orchestrator.ts`, `apps/server/src/auth/RpcAuthorization.ts`, `apps/server/src/observability/RpcInstrumentation.ts`, `packages/contracts/src/environment.ts`, `apps/web/src/components/ChatView.tsx`, `apps/web/src/components/Sidebar.tsx`, `apps/web/src/rightPanelStore.ts`, `apps/web/src/components/settings/settingsSearch.ts`. New server capabilities are HTTP routes under `/api/polaris/*`, not RPC methods.
 6. **Generated files are regenerated, not merged:** `pnpm-lock.yaml` (`vp i`) and `apps/web/src/routeTree.gen.ts`.
 7. **The bridge compiles against `@t3tools/contracts`.** After a merge, `vp run --filter @t3tools/polaris-bridge typecheck` and its tests show any contract drift, confined to fork-owned code.

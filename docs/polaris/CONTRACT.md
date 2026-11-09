@@ -144,8 +144,14 @@ so far, and one line per tool action (`⏺ Bash: <command>`, `⏺ Edit: <path>`,
 | `claude.notification`      | An approval becomes pending                                                                                                     | `{"text", "requestId", "notification_type": "permission_prompt"}`                                                                                |
 | `t3.run.failed`            | A run fails without assistant text                                                                                              | `{"text": "<error>", "t3RunId"}`                                                                                                                 |
 
-Each event is emitted exactly once per underlying T3 fact, including across bridge
-restarts.
+Every event the bridge posts carries a top-level `eventId` string that is stable for the
+underlying T3 fact (for example `t3:<threadId>:run:<t3RunId>:terminal`,
+`t3:<threadId>:request:<requestId>`, `t3:<threadId>:message:<messageId>`). `polarisd`
+treats `(runId, eventId)` as an idempotency key, checked in the same transaction that
+writes the event: a repeat returns `200` with the original event and writes nothing.
+The bridge retries until acknowledged, so each fact is recorded exactly once, including
+across bridge crashes and restarts. Events without `eventId` (from other sources) are
+never deduplicated.
 
 ### `POST /v0/t3/runs/adopt`
 

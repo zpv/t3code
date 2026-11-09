@@ -1,0 +1,20 @@
+{
+  "name": "@t3tools/polaris-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "effect-tsgo tsrs --noEmit",
+    "test": "vp test run",
+    "start": "node src/bin.ts",
+    "smoke": "node scripts/smoke.ts",
+    "smoke:import": "node scripts/smoke-import.ts",
+    "check-seams": "node scripts/check-seams.ts"
+  },
+  "dependencies": {
+    "@t3tools/contracts": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:"
+  }
+}
