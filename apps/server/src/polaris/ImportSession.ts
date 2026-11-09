@@ -615,6 +615,7 @@ const make = Effect.gen(function* () {
           message: "Thread belongs to another session",
         });
       }
+      yield* Effect.logError("Polaris session import could not be written", committed.failure);
       return yield* new ImportError({ status: 500, message: "Could not import session" });
     }
     if (committed.success.length === 0)

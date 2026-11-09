@@ -801,7 +801,13 @@ async function route(req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse
       body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
     }
     if (req.method === "POST" && ["/v1/threads", "/v1/threads/import"].includes(url.pathname)) {
-      const result = await create(body as Create, url.pathname.endsWith("/import"));
+      // polarisd sends absent optional fields as empty strings or null.
+      const input = Object.fromEntries(
+        Object.entries(body as Record<string, unknown>).filter(
+          ([, value]) => value !== "" && value !== null,
+        ),
+      ) as unknown as Create;
+      const result = await create(input, url.pathname.endsWith("/import"));
       return reply(result.code, result.body);
     }
     const match = /^\/v1\/threads\/([^/]+)(?:\/(input|stop|snapshot))?$/.exec(url.pathname);
