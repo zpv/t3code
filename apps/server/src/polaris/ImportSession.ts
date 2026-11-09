@@ -314,11 +314,32 @@ async function parseHistory(input: Input, transcriptPath: string, mtime: number)
     if (!flush() || !firstUser || (input.driver === "codex" && !sessionSeen)) return null;
     const messages =
       count <= 400 || recent.includes(firstUser) ? recent : [firstUser, ...recent.slice(-399)];
-    return { messages, omitted: count - messages.length };
+    const visible = messages.flatMap((message) => {
+      const text = terminalCommandText(message.text);
+      return text === null ? [] : [text === message.text ? message : { ...message, text }];
+    });
+    return {
+      messages: visible.length > 0 ? visible : messages,
+      omitted: count - messages.length,
+    };
   } finally {
     lines.close();
     source.destroy();
   }
+}
+
+/**
+ * Claude Code records slash commands typed in its terminal as XML-wrapped user messages.
+ * Returns the command as the user typed it, null for the command's echoed output, or the
+ * text unchanged when it is an ordinary message.
+ */
+function terminalCommandText(text: string): string | null {
+  const trimmed = text.trim();
+  if (/^<local-command-(stdout|stderr|caveat)>/.test(trimmed)) return null;
+  const name = /<command-name>([\s\S]*?)<\/command-name>/.exec(trimmed)?.[1]?.trim();
+  if (!name) return text;
+  const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(trimmed)?.[1]?.trim();
+  return args ? `${name} ${args}` : name;
 }
 
 async function findTranscript(
