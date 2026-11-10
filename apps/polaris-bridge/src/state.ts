@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import type { Event } from "./logic.ts";
+import type { PlannedAccount } from "./accounts.ts";
 
 export type Entry = {
   runId: string;
@@ -17,12 +18,23 @@ export type Entry = {
   modelFallback?: { requested: string; used: string };
   switchRuns?: string[];
   switchAccounts?: string[];
+  switching?: {
+    from: string;
+    to: string;
+    failedRunId: string;
+    moveCommandId: string;
+    messageCommandId: string;
+    messageId: string;
+    event: Event;
+  };
 };
 export type State = {
   threads: Record<string, Entry>;
   shellCursor?: number;
   briefArgs?: Record<string, string>;
   ownedInstances?: string[];
+  knownAccounts?: PlannedAccount[];
+  retiredAccounts?: PlannedAccount[];
 };
 export function openState(statePath: string) {
   const state: State = NodeFS.existsSync(statePath)

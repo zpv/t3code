@@ -14,6 +14,10 @@
 
 Claude's launch argument is `--append-system-prompt-file <path>`. Codex's app-server launch arguments carry `-c developer_instructions=<TOML string>` containing the brief. The isolated live turns above exercised those provisioned launch arguments.
 
-## Remaining work
+## Round 2
 
-The requested module split is incomplete: `bin.ts` still owns orchestration, provisioning, dispatch, HTTP routing, and the WebSocket lifecycle. Auto-switch recovery and provisioning need deeper failure and restart tests, including persistence across a crash during a switch. The acceptance smoke and typechecks do not establish those cases. The implementation should not be considered complete until those paths and the requested decomposition are finished and the acceptance suite is rerun.
+The bridge now separates account provisioning, thread operations, input dispatch, event delivery, HTTP routing, and the WebSocket lifecycle into their respective modules. The entry point delegates wiring to `bridge.ts`.
+
+Auto-switch persists its intent and stable command and event IDs before moving the thread. Recovery retries the move and continuation through T3's command receipts and the switch event through polarisd's event-id deduplication. If the target is unavailable or the thread has moved elsewhere, the bridge abandons the intent and reports the failed run. Removed accounts remain listed as disabled and retain their provider instance while a thread uses them. Config reload retries failed provisioning.
+
+The bridge tests cover the switch recovery boundaries, an unavailable target, all accounts limited, a failed provisioning call followed by success, and removal of an account in use. The isolated replay smoke exercised a web-origin RPC message, checked that bridge input does not produce a `user.prompt`, answered the `showcase` approval and the `question` elicitation through the bridge, and observed both runs complete. Both scenarios are already built into the dev replay provider. Evidence: `/var/folders/yx/3lbxv4sn1wgf4n9gf5mm9_340000gn/T/polaris-smoke-NGpXNk`.

@@ -6,7 +6,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeHttp from "node:http";
 import * as NodeCrypto from "node:crypto";
-import { createDirect, readProjection } from "./smoke-rpc.ts";
+import { createDirect, dispatchDirect, readProjection } from "./smoke-rpc.ts";
 
 const root = NodePath.resolve(import.meta.dirname, "../../..");
 const base = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "polaris-smoke-"));
@@ -184,7 +184,7 @@ try {
   NodeFS.writeFileSync(
     bridgeEnv.POLARIS_T3_BRIDGE_CONFIG,
     JSON.stringify({
-      defaults: { phoneNotifications: false },
+      defaults: { phoneNotifications: false, runtimeMode: "approval-required" },
       ...(live ? { agentBriefFile: briefPath } : {}),
       accounts: {
         replay: [
@@ -316,12 +316,87 @@ try {
     return p.runs.some((run) => run.freshContext === true) ? true : undefined;
   });
   NodeAssert.ok(fresh);
+  const approval = await until("approval notification", async () =>
+    records.find(
+      (r) => r.path === `/v0/runs/${runId}/events` && r.body.type === "claude.notification",
+    ),
+  );
+  NodeAssert.match(String((approval.body.payload as { text: string }).text), /Changed files/);
+  const approvalState = (await (
+    await fetch(`${bridgeOrigin}/v1/threads/${created.threadId}`)
+  ).json()) as {
+    turnState: string;
+    pendingRequest: { kind: string; text: string };
+  };
+  NodeAssert.equal(approvalState.turnState, "waiting");
+  NodeAssert.equal(approvalState.pendingRequest.kind, "approval");
+  NodeAssert.match(approvalState.pendingRequest.text, /Changed files/);
+  await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, { input: "yes" });
   const completed = await until("assistant completion", async () =>
     records.find(
       (r) => r.path === `/v0/runs/${runId}/events` && r.body.type === "assistant.completed",
     ),
   );
   NodeAssert.ok((completed.body.payload as { text: string }).text.length > 0);
+  NodeAssert.equal(
+    records.filter((r) => r.path === `/v0/runs/${runId}/events` && r.body.type === "user.prompt")
+      .length,
+    0,
+  );
+
+  const questionRun = `run_${NodeCrypto.randomUUID()}`;
+  const questionThread = await json(`${bridgeOrigin}/v1/threads`, {
+    runId: questionRun,
+    agent: "replay",
+    title: "Question",
+    repoPath: repo,
+    model: "question",
+  });
+  const directText = "Question sent from the web client";
+  await dispatchDirect(origin, token, questionThread.threadId, directText);
+  const prompt = await until("direct user prompt", async () =>
+    records.find(
+      (r) => r.path === `/v0/runs/${questionRun}/events` && r.body.type === "user.prompt",
+    ),
+  );
+  NodeAssert.deepEqual(
+    {
+      text: (prompt.body.payload as { text: string }).text,
+      origin: (prompt.body.payload as { origin: string }).origin,
+    },
+    { text: directText, origin: "t3" },
+  );
+  const question = await until("question notification", async () =>
+    records.find(
+      (r) =>
+        r.path === `/v0/runs/${questionRun}/events` && r.body.type === "claude.ask_user_question",
+    ),
+  );
+  const questionPayload = question.body.payload as { text: string; options: string[] };
+  NodeAssert.match(questionPayload.text, /strict schemas or UI flexibility/i);
+  NodeAssert.deepEqual(questionPayload.options, ["Strict schemas (Recommended)", "UI flexibility"]);
+  const questionState = (await (
+    await fetch(`${bridgeOrigin}/v1/threads/${questionThread.threadId}`)
+  ).json()) as {
+    turnState: string;
+    pendingRequest: { kind: string; text: string; options: string[] };
+  };
+  NodeAssert.equal(questionState.turnState, "waiting");
+  NodeAssert.equal(questionState.pendingRequest.kind, "question");
+  NodeAssert.match(questionState.pendingRequest.text, /strict schemas or UI flexibility/i);
+  NodeAssert.deepEqual(questionState.pendingRequest.options, questionPayload.options);
+  await json(`${bridgeOrigin}/v1/threads/${questionThread.threadId}/input`, { input: "1" });
+  await until("question completion", async () =>
+    records.find(
+      (r) => r.path === `/v0/runs/${questionRun}/events` && r.body.type === "assistant.completed",
+    ),
+  );
+  NodeAssert.equal(
+    records.filter(
+      (r) => r.path === `/v0/runs/${questionRun}/events` && r.body.type === "user.prompt",
+    ).length,
+    1,
+  );
   NodeAssert.ok(
     (await json(`${bridgeOrigin}/v1/threads/${created.threadId}/snapshot`)).output.length > 0,
   );
