@@ -4,14 +4,10 @@ import type {
   OrchestrationV2ThreadProjection,
   ProviderOptionDescriptor,
 } from "@t3tools/contracts";
-import {
-  deriveEvents,
-  eventFacts,
-  effortOption,
-  instanceFor,
-  pendingRequest,
-  renderSnapshot,
-} from "./logic.ts";
+import { effortOption, pendingRequest, resolveModel, publicOrigin, formatReply } from "./logic.ts";
+
+import { deriveEvents, eventFacts } from "./events.ts";
+import { renderSnapshot } from "./snapshot.ts";
 
 const projection = (value: object) => value as OrchestrationV2ThreadProjection;
 
@@ -101,14 +97,7 @@ describe("bridge projection logic", () => {
       "claude.ask_user_question",
     );
   });
-  it("selects instances and validates effort options", () => {
-    const warnings: string[] = [];
-    const instances = { claude: { default: "claudeAgent", profiles: { main: "other" } } };
-    expect(instanceFor("claude", "main", instances, (s) => warnings.push(s))).toBe("other");
-    expect(instanceFor("claude", "missing", instances, (s) => warnings.push(s))).toBe(
-      "claudeAgent",
-    );
-    expect(warnings).toHaveLength(1);
+  it("validates effort options", () => {
     const options = [
       {
         id: "reasoningEffort",
@@ -123,5 +112,59 @@ describe("bridge projection logic", () => {
     });
     expect(effortOption("claudeAgent", "high", options)).toBeUndefined();
     expect(effortOption("codex", "invalid", options)).toBeUndefined();
+  });
+  it("advances questions and assigns a stable event per index", () => {
+    const p = projection({
+      thread: { id: "thread" },
+      messages: [],
+      runs: [],
+      runtimeRequests: [{ id: "q", status: "pending" }],
+      turnItems: [
+        {
+          type: "user_input_request",
+          requestId: "q",
+          questions: [
+            { id: "first", question: "First?", options: [] },
+            { id: "second", question: "Second?", options: [] },
+          ],
+        },
+      ],
+    });
+    const first = deriveEvents(p, { events: [], dispatched: [] });
+    const second = deriveEvents(p, {
+      events: first.map((e) => e.eventId),
+      dispatched: [],
+      answers: { requestId: "q", values: { first: "yes" } },
+    });
+    expect(first[0]?.eventId).toBe("t3:thread:request:q:0");
+    expect(second[0]?.eventId).toBe("t3:thread:request:q:1");
+    expect(pendingRequest(p, { requestId: "q", values: { first: "yes" } })?.text).toBe("Second?");
+    expect(
+      pendingRequest(projection({ ...p, runtimeRequests: [{ id: "q", status: "resolved" }] }), {
+        requestId: "q",
+        values: { first: "yes" },
+      }),
+    ).toBeNull();
+  });
+  it("resolves models and chooses remote origins", () => {
+    const models = [
+      { slug: "claude-opus-5-5", aliases: ["opus"] },
+      { slug: "claude-sonnet-5", aliases: ["sonnet"] },
+    ] as never;
+    expect(resolveModel(models, "OPUS")).toBe("claude-opus-5-5");
+    expect(resolveModel(models, "sonnet-5")).toBe("claude-sonnet-5");
+    expect(resolveModel(models, "claude")).toBeUndefined();
+    expect(resolveModel(models, "unknown")).toBeUndefined();
+    const endpoints = [
+      { kind: "lan", httpBaseUrl: "http://lan" },
+      { kind: "tailnet", httpBaseUrl: "http://tail" },
+      { kind: "tailnet", httpBaseUrl: "https://tail" },
+    ] as const;
+    expect(publicOrigin("https://public/", endpoints, "http://local")).toBe("https://public");
+    expect(publicOrigin(undefined, endpoints, "http://local")).toBe("https://tail");
+    expect(publicOrigin(undefined, endpoints.slice(0, 2), "http://local")).toBe("http://tail");
+    expect(publicOrigin(undefined, endpoints.slice(0, 1), "http://local")).toBe("http://lan");
+    expect(publicOrigin(undefined, [], "http://local")).toBe("http://local");
+    expect(formatReply("\x1b[31m" + "a".repeat(2000))).toHaveLength(1800);
   });
 });

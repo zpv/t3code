@@ -24,6 +24,12 @@ describe("interpretInput", () => {
       expect(interpretInput(text, a)).toEqual({ type: "approval", approved: false });
     expect(interpretInput("/model foo", null)).toEqual({ type: "model", value: "foo" });
     expect(interpretInput("/effort high", null)).toEqual({ type: "effort", value: "high" });
+    for (const command of ["model", "effort", "account", "status", "usage", "context", "clear"]) {
+      expect(interpretInput(`/${command}`, null)).toEqual({ type: command, value: "" });
+    }
+    expect(interpretInput("/account second", null)).toEqual({ type: "account", value: "second" });
+    for (const text of ["/compact", "/goal finish", "$skill do it"])
+      expect(interpretInput(text, null)).toEqual({ type: "message", text });
     expect(interpretInput("hello", null)).toEqual({ type: "message", text: "hello" });
   });
 });

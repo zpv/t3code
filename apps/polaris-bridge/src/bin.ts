@@ -15,6 +15,7 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   WsRpcGroup,
   ORCHESTRATION_PROTOCOL_VERSION,
@@ -25,17 +26,25 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ShellSnapshot,
   type ChatAttachment,
+  type ProviderInstanceConfig,
 } from "@t3tools/contracts";
 import {
-  deriveEvents,
-  eventFacts,
   effortOption,
-  instanceFor,
   pendingRequest,
-  renderSnapshot,
+  resolveModel,
+  publicOrigin,
+  formatReply,
   type Event,
 } from "./logic.ts";
+import { deriveEvents, eventFacts } from "./events.ts";
+import { turnState, effort, nativeSession } from "./threads.ts";
+import { renderSnapshot } from "./snapshot.ts";
 import { interpretInput } from "./input.ts";
+import { HttpFailure, t3Request } from "./t3Client.ts";
+import { postPolaris as sendPolaris } from "./polarisClient.ts";
+import { configPath, readConfig } from "./config.ts";
+import { openState, type Entry } from "./state.ts";
+import { accountPlan, chooseAccount, chooseSwitch, type Account } from "./accounts.ts";
 
 type Agent = "claude" | "codex" | "replay";
 type Create = {
@@ -56,27 +65,7 @@ type Create = {
   lastActivityAt?: string;
   settled?: boolean;
 };
-type ConfigFile = {
-  T3_ORIGIN?: string;
-  T3_TOKEN?: string;
-  POLARIS_SERVER?: string;
-  POLARIS_T3_BRIDGE_PORT?: string | number;
-  POLARIS_T3_BRIDGE_TOKEN?: string;
-  POLARIS_T3_BRIDGE_STATE?: string;
-  instances?: Record<string, { default: string; profiles: Record<string, string> }>;
-  defaults?: {
-    claude?: { model?: string | null; effort?: string | null };
-    codex?: { model?: string | null; effort?: string | null };
-    runtimeMode?: "full-access" | "approval-required";
-    phoneNotifications?: boolean;
-  };
-};
-const configPath =
-  process.env.POLARIS_T3_BRIDGE_CONFIG ??
-  NodePath.join(NodeOS.homedir(), ".polaris/t3-bridge.json");
-const file: ConfigFile = NodeFS.existsSync(configPath)
-  ? JSON.parse(NodeFS.readFileSync(configPath, "utf8"))
-  : {};
+let file = readConfig();
 const origin = (process.env.T3_ORIGIN ?? file.T3_ORIGIN ?? "http://127.0.0.1:3773").replace(
   /\/$/,
   "",
@@ -99,65 +88,12 @@ const headers = {
   "Content-Type": "application/json",
   [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
 };
-type Entry = {
-  runId: string;
-  events: string[];
-  dispatched: string[];
-  cursor?: number;
-  state?: string;
-  outbox: Event[];
-  pendingCreation?: "create" | "import";
-};
-type State = { threads: Record<string, Entry>; shellCursor?: number };
-const state: State = NodeFS.existsSync(statePath)
-  ? JSON.parse(NodeFS.readFileSync(statePath, "utf8"))
-  : { threads: {} };
-function save() {
-  NodeFS.mkdirSync(NodePath.dirname(statePath), { recursive: true });
-  const temp = `${statePath}.${process.pid}.tmp`;
-  NodeFS.writeFileSync(temp, JSON.stringify(state), { mode: 0o600 });
-  NodeFS.renameSync(temp, statePath);
-}
+const { state, save } = openState(statePath);
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const log = (s: string) => console.error(`[polaris-bridge] ${s.slice(0, 300)}`);
-class HttpFailure extends Error {
-  readonly status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
-async function t3(pathname: string, options: RequestInit = {}) {
-  const res = await fetch(origin + pathname, {
-    ...options,
-    headers: { ...headers, ...options.headers },
-  });
-  if (!res.ok)
-    throw new HttpFailure(res.status, `T3 ${pathname}: ${res.status} ${await res.text()}`);
-  return res.json();
-}
-async function postPolaris(pathname: string, body: object): Promise<unknown> {
-  let backoff = 250;
-  for (;;) {
-    try {
-      const res = await fetch(polaris + pathname, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (res.ok) return await res.json();
-      if (res.status < 500) {
-        log(`polaris ${pathname}: ${res.status}, dropped`);
-        return null;
-      }
-      log(`polaris ${pathname}: ${res.status}, retrying`);
-    } catch (error) {
-      log(`polaris ${pathname}: ${String(error)}, retrying`);
-    }
-    await delay(backoff + (Math.random() * backoff) / 4);
-    backoff = Math.min(backoff * 2, 30_000);
-  }
-}
+const t3 = (pathname: string, options: RequestInit = {}) =>
+  t3Request(origin, headers, pathname, options);
+const postPolaris = (pathname: string, body: object) => sendPolaris(polaris, pathname, body);
 const makeClient = () => RpcClient.make(WsRpcGroup);
 type Client = Effect.Success<ReturnType<typeof makeClient>>;
 let client: Client | undefined;
@@ -170,35 +106,166 @@ function requireClient() {
   if (!client || !serverConfig) throw new Error("T3 is disconnected");
   return client;
 }
+const expandPath = (path: string) =>
+  path.startsWith("~/") ? NodePath.join(NodeOS.homedir(), path.slice(2)) : NodePath.resolve(path);
+function accounts(): Account[] {
+  return accountPlan(file.accounts, process.env.POLARIS_T3_BRIDGE_ALLOW_REPLAY === "1").map(
+    (entry) => {
+      const provider = serverConfig?.providers.find((p) => p.instanceId === entry.id);
+      let signedIn: boolean | null =
+        provider?.auth.status === "authenticated"
+          ? true
+          : provider?.auth.status === "unauthenticated"
+            ? false
+            : null;
+      if (entry.tokenFile) {
+        try {
+          signedIn = NodeFS.readFileSync(expandPath(entry.tokenFile), "utf8").trim().length > 0;
+        } catch {
+          signedIn = false;
+        }
+      } else if (entry.authHome) {
+        try {
+          signedIn = NodeFS.lstatSync(
+            NodePath.join(expandPath(entry.authHome), "auth.json"),
+          ).isFile();
+        } catch {
+          signedIn = false;
+        }
+      }
+      return {
+        id: entry.id,
+        agent: entry.agent,
+        profile: entry.profile,
+        label: entry.label,
+        enabled: entry.enabled !== false && (provider?.enabled ?? true),
+        signedIn,
+        default: entry.default === true,
+        usage: provider?.usageLimits ?? null,
+      };
+    },
+  );
+}
+async function refreshUsage() {
+  if (!serverConfig) return;
+  if (accounts().some((a) => a.usage && Date.now() - Date.parse(a.usage.checkedAt) > 300_000)) {
+    const result = await Effect.runPromise(
+      requireClient()["server.refreshProviders"]({ fresh: true }),
+    );
+    serverConfig = { ...serverConfig, providers: result.providers };
+  }
+}
+async function provision() {
+  if (!serverConfig) return;
+  const plan = accountPlan(file.accounts, process.env.POLARIS_T3_BRIDGE_ALLOW_REPLAY === "1");
+  for (const id of state.ownedInstances ?? []) {
+    if (plan.some((account) => account.id === id)) continue;
+    const settings = await Effect.runPromise(
+      requireClient()["server.updateSettings"]({
+        patch: {},
+        providerInstanceMutation: { operation: "remove", instanceId: ProviderInstanceId.make(id) },
+      }),
+    );
+    serverConfig = { ...serverConfig, settings };
+    state.ownedInstances = (state.ownedInstances ?? []).filter((owned) => owned !== id);
+    if (state.briefArgs) delete state.briefArgs[id];
+    save();
+  }
+  if (!file.accounts && !file.agentBriefFile && !Object.keys(state.briefArgs ?? {}).length) return;
+  for (const account of plan) {
+    const baseId =
+      account.agent === "claude"
+        ? "claudeAgent"
+        : account.agent === "codex"
+          ? "codex"
+          : "devReplay";
+    const base = serverConfig.settings.providerInstances[ProviderInstanceId.make(baseId)] ?? {
+      driver: ProviderDriverKind.make(baseId),
+      config: {},
+    };
+    const existing = serverConfig.settings.providerInstances[ProviderInstanceId.make(account.id)];
+    const baseConfig = (base.config ?? {}) as Record<string, unknown>;
+    const existingConfig = (existing?.config ?? {}) as Record<string, unknown>;
+    const config: Record<string, unknown> = { ...baseConfig, ...existingConfig };
+    if (account.agent === "claude") config.homePath = baseConfig.homePath ?? "";
+    if (account.agent === "codex" && !account.default) {
+      config.homePath = baseConfig.homePath ?? "";
+      config.shadowHomePath = account.authHome ? expandPath(account.authHome) : "";
+    }
+    const previousBrief = state.briefArgs?.[account.id];
+    let launchArgs = typeof config.launchArgs === "string" ? config.launchArgs : "";
+    if (!existing && state.briefArgs?.[baseId])
+      launchArgs = launchArgs.replace(state.briefArgs[baseId], "").trim();
+    if (previousBrief) launchArgs = launchArgs.replace(previousBrief, "").trim();
+    let newBrief: string | undefined;
+    if (file.agentBriefFile && NodeFS.existsSync(expandPath(file.agentBriefFile))) {
+      const briefPath = expandPath(file.agentBriefFile);
+      if (account.agent === "claude")
+        newBrief = `--append-system-prompt-file ${JSON.stringify(briefPath)}`;
+      else if (account.agent === "codex")
+        newBrief = `-c ${JSON.stringify(`developer_instructions=${JSON.stringify(NodeFS.readFileSync(briefPath, "utf8"))}`)}`;
+    }
+    config.launchArgs = [launchArgs, newBrief].filter(Boolean).join(" ");
+    let environment = [...(existing?.environment ?? [])].filter(
+      (v) => v.name !== "CLAUDE_CODE_OAUTH_TOKEN",
+    );
+    if (account.tokenFile) {
+      let tokenValue = "";
+      try {
+        tokenValue = NodeFS.readFileSync(expandPath(account.tokenFile), "utf8").trim();
+      } catch {}
+      if (tokenValue)
+        environment.push({ name: "CLAUDE_CODE_OAUTH_TOKEN", value: tokenValue, sensitive: true });
+    } else if (account.default) environment = [...(existing?.environment ?? [])];
+    const instance: ProviderInstanceConfig = {
+      ...base,
+      ...existing,
+      displayName: account.label,
+      enabled: account.enabled !== false,
+      config,
+      environment,
+    };
+    try {
+      const settings = await Effect.runPromise(
+        requireClient()["server.updateSettings"]({
+          patch: {},
+          providerInstanceMutation: {
+            operation: "upsert",
+            instanceId: ProviderInstanceId.make(account.id),
+            instance,
+          },
+        }),
+      );
+      serverConfig = { ...serverConfig, settings };
+      if (!existing && !account.default) {
+        state.ownedInstances = [...new Set([...(state.ownedInstances ?? []), account.id])];
+      }
+      state.briefArgs ??= {};
+      if (newBrief) state.briefArgs[account.id] = newBrief;
+      else delete state.briefArgs[account.id];
+      save();
+    } catch {
+      throw new Error(`Could not provision ${account.agent} account ${account.profile}`);
+    }
+  }
+  serverConfig = await Effect.runPromise(requireClient()["server.getConfig"]({}));
+}
 const projectId = () => ProjectId.make(NodeCrypto.randomUUID());
 const commandId = () => CommandId.make(NodeCrypto.randomUUID());
 const threadId = (id: string) => ThreadId.make(id);
 const messageId = () => MessageId.make(NodeCrypto.randomUUID());
+const currentPublicOrigin = () =>
+  publicOrigin(
+    process.env.T3_PUBLIC_ORIGIN ?? file.publicOrigin,
+    serverConfig?.directEndpoints ?? [],
+    origin,
+  );
 const link = (id: string) =>
-  `${origin}/threads/${encodeURIComponent(serverConfig?.environment.environmentId ?? "")}/${encodeURIComponent(id)}`;
+  `${currentPublicOrigin()}/threads/${encodeURIComponent(serverConfig?.environment.environmentId ?? "")}/${encodeURIComponent(id)}`;
 async function projection(id: string) {
   return Effect.runPromise(
     requireClient()["orchestration.getThreadProjection"]({ threadId: threadId(id) }),
   );
-}
-function turnState(p: OrchestrationV2ThreadProjection) {
-  if (pendingRequest(p)) return "waiting";
-  const run = p.runs.at(-1);
-  if (!run) return "idle";
-  if (["failed"].includes(run.status)) return "failed";
-  if (["completed", "interrupted", "cancelled", "rolled_back"].includes(run.status)) return "idle";
-  return "working";
-}
-function effort(p: OrchestrationV2ThreadProjection) {
-  return (
-    p.thread.modelSelection.options?.find((o) => /effort|reasoning/i.test(o.id))?.value ?? null
-  );
-}
-function nativeSession(p: OrchestrationV2ThreadProjection) {
-  const thread =
-    p.providerThreads.find((t) => t.id === p.thread.activeProviderThreadId) ??
-    p.providerThreads.findLast((t) => t.providerInstanceId === p.thread.providerInstanceId);
-  return thread?.nativeThreadRef?.nativeId ?? null;
 }
 const flushes = new Map<string, Promise<void>>();
 function flush(id: string, p: OrchestrationV2ThreadProjection, facts = p): Promise<void> {
@@ -220,18 +287,105 @@ async function flushNow(
 ) {
   const entry = state.threads[id];
   if (!entry) return;
+  if (
+    entry.answers &&
+    !p.runtimeRequests.some(
+      (request) => request.id === entry.answers?.requestId && request.status === "pending",
+    )
+  ) {
+    delete entry.answers;
+  }
+  const terminal = facts.runs.find((run) => run.status === "failed");
+  const limit =
+    terminal &&
+    p.turnItems.findLast(
+      (item) =>
+        item.runId === terminal.id && item.type === "error" && item.failure.class === "usage_limit",
+    );
+  let switched = false;
+  if (
+    terminal &&
+    limit &&
+    file.accounts?.autoSwitch &&
+    !entry.switchRuns?.includes(terminal.id) &&
+    !entry.events.includes(`t3:${id}:run:${terminal.id}:terminal`)
+  ) {
+    const currentAccount = accounts().find((a) => a.id === p.thread.providerInstanceId);
+    if (currentAccount) {
+      const target = chooseSwitch(
+        accounts(),
+        currentAccount,
+        entry.switchAccounts ?? [],
+        entry.accountChangedAt,
+        Date.now(),
+        file.accounts.switchAtPercent ?? 97,
+      );
+      entry.switchRuns = [...(entry.switchRuns ?? []), terminal.id];
+      entry.switchAccounts = [...new Set([...(entry.switchAccounts ?? []), currentAccount.id])];
+      save();
+      if (target) {
+        await changeAccount(
+          id,
+          target.profile,
+          "usage_limit",
+          false,
+          limit.type === "error" ? (limit.failure.resetAt ?? undefined) : undefined,
+        );
+        const mid = messageId();
+        entry.dispatched.push(mid);
+        save();
+        await Effect.runPromise(
+          requireClient()["orchestration.dispatchCommand"]({
+            type: "message.dispatch",
+            commandId: commandId(),
+            threadId: threadId(id),
+            messageId: mid,
+            text: "Continue where you left off.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "server",
+            usageLimitContinuationOfRunId: terminal.id,
+          }),
+        );
+        switched = true;
+      }
+    }
+  }
+  if (facts.runs.some((run) => run.status === "completed")) {
+    delete entry.switchAccounts;
+    delete entry.switchRuns;
+  }
   for (const event of deriveEvents(facts, entry)) {
+    if (switched && event.eventId === `t3:${id}:run:${terminal?.id}:terminal`) {
+      entry.events.push(event.eventId);
+      continue;
+    }
+    if (
+      limit &&
+      terminal &&
+      event.eventId === `t3:${id}:run:${terminal.id}:terminal` &&
+      !switched
+    ) {
+      const current = accounts().find((a) => a.id === p.thread.providerInstanceId);
+      const resets = accounts()
+        .filter((a) => a.agent === current?.agent)
+        .flatMap((a) => a.usage?.windows.flatMap((w) => (w.resetsAt ? [w.resetsAt] : [])) ?? [])
+        .sort();
+      event.type = "t3.run.failed";
+      event.payload = {
+        text: `${limit.type === "error" ? limit.failure.message : "Usage limit reached"}${resets[0] ? ` (earliest reset ${resets[0]})` : ""}`,
+        t3RunId: terminal.id,
+      };
+    }
+    event.payload.link = link(id);
     entry.events.push(event.eventId);
     entry.outbox.push(event);
   }
   save();
   while (entry.outbox.length) {
     const event = entry.outbox[0]!;
-    log(
-      `event ${entry.runId} ${event.type} ${String(event.payload.text ?? "")
-        .replace(/\s+/g, " ")
-        .slice(0, 80)}`,
-    );
+    log(`event ${entry.runId} ${event.type}`);
     const result = await postPolaris(`/v0/runs/${encodeURIComponent(entry.runId)}/events`, event);
     if (
       result &&
@@ -257,6 +411,10 @@ async function flushNow(
     nativeSessionId: nativeSession(p),
     archived: p.thread.archivedAt !== null,
     deleted: p.thread.deletedAt !== null,
+    link: link(id),
+    ...(accounts().find((a) => a.id === p.thread.providerInstanceId)?.profile
+      ? { accountProfile: accounts().find((a) => a.id === p.thread.providerInstanceId)!.profile }
+      : {}),
   };
   const serialized = JSON.stringify(current);
   if (serialized !== entry.state) {
@@ -264,6 +422,17 @@ async function flushNow(
     entry.state = serialized;
     save();
   }
+}
+async function refreshLinks() {
+  await Promise.all(
+    Object.keys(state.threads).map(async (id) => {
+      try {
+        await flush(id, await projection(id));
+      } catch {
+        log(`Could not refresh thread ${id}`);
+      }
+    }),
+  );
 }
 const projectsInFlight = new Map<string, Promise<ProjectId>>();
 async function getProject(repoPath: string, title?: string) {
@@ -306,13 +475,21 @@ async function getProjectForPath(real: string, title?: string) {
 function modelSelection(input: Create) {
   const config = serverConfig;
   if (!config) throw new Error("T3 is disconnected");
-  const instance = instanceFor(input.agent, input.accountProfile, file.instances ?? {}, log);
+  const selected = chooseAccount(
+    accounts(),
+    input.agent,
+    input.accountProfile,
+    file.accounts?.autoSwitch === true,
+    file.accounts?.switchAtPercent ?? 97,
+  );
+  if (!selected) throw new Refusal(`Account unavailable: ${input.accountProfile ?? input.agent}`);
+  const instance = selected.id;
   const provider = config.providers.find((p) => p.instanceId === instance);
   if (!provider) throw new Error(`Unknown provider instance ${instance}`);
   const defaults = input.agent === "replay" ? undefined : file.defaults?.[input.agent];
+  const requested = input.model || defaults?.model;
   const model =
-    input.model ||
-    defaults?.model ||
+    (requested ? resolveModel(provider.models, requested) : undefined) ||
     provider.models.find((m) => m.isDefault)?.slug ||
     provider.models[0]?.slug;
   if (!model) throw new Error(`No model available for ${instance}`);
@@ -377,16 +554,29 @@ async function createOnce(input: Create, importing: boolean) {
         ...(importing
           ? { created: false, messageCount: (await projection(id)).messages.length }
           : {}),
+        ...(existing.modelFallback ? { modelFallback: existing.modelFallback } : {}),
       },
     };
+  await refreshUsage();
   const project = await getProject(input.repoPath, input.projectTitle);
   const selection = modelSelection(input);
+  const modelFallback =
+    input.model &&
+    selection.model !== input.model &&
+    !resolveModel(
+      serverConfig?.providers.find((p) => p.instanceId === selection.instanceId)?.models ?? [],
+      input.model,
+    )
+      ? { requested: input.model, used: selection.model }
+      : undefined;
   const entry: Entry = {
     runId: input.runId,
     events: [],
     dispatched: [],
     outbox: [],
     pendingCreation: importing ? "import" : "create",
+    ...(input.accountProfile ? { accountChangedAt: Date.now() } : {}),
+    ...(modelFallback ? { modelFallback } : {}),
   };
   state.threads[id] = entry;
   save();
@@ -421,6 +611,7 @@ async function createOnce(input: Create, importing: boolean) {
         environmentId: serverConfig?.environment.environmentId,
         link: link(id),
         ...response,
+        ...(modelFallback ? { modelFallback } : {}),
       },
     };
   }
@@ -458,6 +649,7 @@ async function createOnce(input: Create, importing: boolean) {
       threadId: id,
       environmentId: serverConfig?.environment.environmentId,
       link: link(id),
+      ...(modelFallback ? { modelFallback } : {}),
     },
   };
 }
@@ -545,13 +737,89 @@ async function upload(files: { path: string; name?: string }[]): Promise<ChatAtt
   return attachments;
 }
 class Refusal extends Error {}
+async function changeAccount(
+  id: string,
+  profile: string,
+  reason: "manual" | "usage_limit" = "manual",
+  flushChanges = true,
+  resetAt?: string,
+) {
+  const p = await projection(id);
+  const from = accounts().find((a) => a.id === p.thread.providerInstanceId);
+  if (!from) throw new Refusal("Current account is unavailable");
+  const target = chooseAccount(
+    accounts(),
+    from.agent,
+    profile,
+    false,
+    file.accounts?.switchAtPercent ?? 97,
+  );
+  if (!target) throw new Refusal(`Account unavailable: ${profile}`);
+  const oldProvider = serverConfig?.providers.find((v) => v.instanceId === from.id);
+  const newProvider = serverConfig?.providers.find((v) => v.instanceId === target.id);
+  if (!newProvider) throw new Refusal("Account provider is unavailable");
+  const resume =
+    oldProvider?.driver === newProvider.driver &&
+    oldProvider.continuation?.groupKey &&
+    oldProvider.continuation.groupKey === newProvider.continuation?.groupKey
+      ? "native"
+      : "handoff";
+  const current = p.thread.modelSelection;
+  const model =
+    resolveModel(newProvider.models, current.model) ??
+    newProvider.models.find((m) => m.isDefault)?.slug ??
+    newProvider.models[0]?.slug;
+  if (!model) throw new Refusal("Account has no available model");
+  if (reason === "manual" && state.threads[id]) {
+    state.threads[id]!.accountChangedAt = Date.now();
+    save();
+  }
+  if (from.id !== target.id) {
+    await Effect.runPromise(
+      requireClient()["orchestration.dispatchCommand"]({
+        type: "thread.model-selection.set",
+        commandId: commandId(),
+        threadId: threadId(id),
+        modelSelection: { instanceId: ProviderInstanceId.make(target.id), model },
+      }),
+    );
+    const entry = state.threads[id];
+    if (entry) {
+      const event: Event = {
+        eventId: `t3:${id}:account:${NodeCrypto.randomUUID()}`,
+        type: "t3.account.switched",
+        source: "t3-bridge",
+        payload: {
+          text:
+            reason === "usage_limit"
+              ? `${from.label} hit its limit${resetAt ? ` (resets ${resetAt})` : ""}. Continuing on ${target.label}.`
+              : `${from.label} account changed to ${target.label}.`,
+          from: from.profile,
+          to: target.profile,
+          reason,
+          resume,
+          link: link(id),
+        },
+      };
+      entry.events.push(event.eventId);
+      entry.outbox.push(event);
+      save();
+      if (flushChanges) await flush(id, await projection(id));
+    }
+  }
+  return {
+    ok: true,
+    account: { id: target.id, profile: target.profile, label: target.label },
+    resume,
+  };
+}
 async function input(
   id: string,
   body: { input: string; attachments?: { path: string; name?: string }[] },
 ) {
   if (typeof body.input !== "string") throw new Refusal("input must be a string");
   const p = await projection(id),
-    pending = pendingRequest(p);
+    pending = pendingRequest(p, state.threads[id]?.answers);
   const action = interpretInput(body.input, pending);
   const thread = threadId(id),
     c = requireClient(),
@@ -576,16 +844,30 @@ async function input(
       action.option === null
         ? action.text
         : (pending.question.options[action.option - 1]?.value ??
-          pending.question.options[action.option - 1]?.label);
-    await Effect.runPromise(
-      c["orchestration.dispatchCommand"]({
-        type: "runtime-request.respond",
-        commandId: commandId(),
-        threadId: thread,
-        requestId: pending.id,
-        answers: { [pending.question.id]: answer },
-      }),
-    );
+          pending.question.options[action.option - 1]!.label);
+    const entry = state.threads[id];
+    if (!entry) throw new Refusal("Thread is not mapped");
+    const values = {
+      ...(entry.answers?.requestId === pending.id ? entry.answers.values : {}),
+      [pending.question.id]: answer,
+    };
+    if (pending.questions.every((question) => question.id in values)) {
+      await Effect.runPromise(
+        c["orchestration.dispatchCommand"]({
+          type: "runtime-request.respond",
+          commandId: commandId(),
+          threadId: thread,
+          requestId: pending.id,
+          answers: values,
+        }),
+      );
+      delete entry.answers;
+      save();
+    } else {
+      entry.answers = { requestId: pending.id, values };
+      save();
+      await flush(id, p);
+    }
     return { ok: true, delivery: "answered", messageId: null };
   }
   if (action.type === "approval" && pending) {
@@ -600,10 +882,106 @@ async function input(
     );
     return { ok: true, delivery: "answered", messageId: null };
   }
+  if (action.type === "account") {
+    const current = accounts().find((a) => a.id === p.thread.providerInstanceId);
+    if (!current) throw new Refusal("Current account is unavailable");
+    if (!action.value)
+      return {
+        ok: true,
+        delivery: "replied",
+        messageId: null,
+        reply: formatReply(
+          `Account: ${current.label} (${current.profile})\nAvailable: ${accounts()
+            .filter((a) => a.agent === current.agent)
+            .map((a) => a.profile)
+            .join(", ")}`,
+        ),
+      };
+    const changed = await changeAccount(id, action.value);
+    return {
+      ok: true,
+      delivery: "configured",
+      messageId: null,
+      reply: formatReply(`Account: ${changed.account.label} (${changed.resume})`),
+    };
+  }
+  if (action.type === "usage") {
+    await refreshUsage();
+    const current = accounts().find((a) => a.id === p.thread.providerInstanceId);
+    const lines = accounts()
+      .filter((a) => a.agent === current?.agent)
+      .map(
+        (a) =>
+          `${a.label}: ${a.usage?.windows.map((w) => `${w.label} ${w.usedPercent}%${w.resetsAt ? ` resets ${w.resetsAt}` : ""}`).join(", ") || "usage unavailable"}`,
+      );
+    return { ok: true, delivery: "replied", messageId: null, reply: formatReply(lines.join("\n")) };
+  }
+  if (action.type === "clear") {
+    if (!serverConfig?.environment.capabilities.freshContext)
+      throw new Refusal("Fresh context is unavailable on this server");
+    const entry = state.threads[id];
+    if (!entry) throw new Refusal("Thread is not mapped");
+    entry.freshContext = true;
+    save();
+    return {
+      ok: true,
+      delivery: "configured",
+      messageId: null,
+      reply: "The next message starts a fresh session.",
+    };
+  }
+  if (action.type === "status")
+    return {
+      ok: true,
+      delivery: "replied",
+      messageId: null,
+      reply: formatReply(
+        `State: ${turnState(p)}\nModel: ${p.thread.modelSelection.model}\nEffort: ${effort(p) ?? "default"}\nAccount: ${accounts().find((a) => a.id === p.thread.providerInstanceId)?.label ?? p.thread.providerInstanceId}\nBranch: ${p.thread.branch ?? "none"}\nWorktree: ${p.thread.worktreePath ?? "root"}\nLink: ${link(id)}`,
+      ),
+    };
+  if (action.type === "context") {
+    const usage = p.providerThreads.find(
+      (thread) => thread.id === p.thread.activeProviderThreadId,
+    )?.contextUsage;
+    return {
+      ok: true,
+      delivery: "replied",
+      messageId: null,
+      reply: usage
+        ? `Context: ${usage.usedTokens} tokens${usage.maxTokens ? ` / ${usage.maxTokens}` : ""}`
+        : "Context-window usage is unavailable.",
+    };
+  }
   if (action.type === "model" || action.type === "effort") {
     const current = p.thread.modelSelection;
     const provider = serverConfig?.providers.find((v) => v.instanceId === current.instanceId);
-    const model = action.type === "model" ? action.value : current.model;
+    if (!provider) throw new Refusal("Provider is unavailable");
+    const models = provider.models.map((m) => m.slug).join(", ");
+    if (action.type === "model" && !action.value)
+      return {
+        ok: true,
+        delivery: "replied",
+        messageId: null,
+        reply: formatReply(`Current model: ${current.model}\nAvailable: ${models}`),
+      };
+    const model =
+      action.type === "model" ? resolveModel(provider.models, action.value) : current.model;
+    if (!model) throw new Refusal(`Unknown model. Available: ${models}`);
+    if (action.type === "effort" && !action.value) {
+      const descriptors =
+        provider.models.find((m) => m.slug === model)?.capabilities?.optionDescriptors ?? [];
+      const descriptor = descriptors.find(
+        (o) => o.type === "select" && /effort|reasoning/i.test(o.id),
+      );
+      return {
+        ok: true,
+        delivery: "replied",
+        messageId: null,
+        reply: formatReply(
+          `Current effort: ${effort(p) ?? "default"}\nAvailable: ${descriptor?.type === "select" ? descriptor.options.map((o) => o.id).join(", ") : "none"}`,
+        ),
+      };
+    }
     const selected =
       action.type === "effort"
         ? effortOption(
@@ -617,7 +995,15 @@ async function input(
     const options =
       action.type === "effort"
         ? [...(current.options ?? []).filter((o) => o.id !== selected!.id), selected!]
-        : [];
+        : (current.options ?? []).filter((o) => {
+            const descriptor = provider.models
+              .find((m) => m.slug === model)
+              ?.capabilities?.optionDescriptors?.find((d) => d.id === o.id);
+            return (
+              descriptor?.type === "select" &&
+              descriptor.options.some((choice) => choice.id === o.value)
+            );
+          });
     await Effect.runPromise(
       c["orchestration.dispatchCommand"]({
         type: "thread.model-selection.set",
@@ -650,8 +1036,11 @@ async function input(
       dispatchMode: { type: active ? "queue_after_active" : "start_immediately" },
       createdBy: "user",
       creationSource: "server",
+      ...(entry.freshContext ? { freshContext: true } : {}),
     }),
   );
+  delete entry.freshContext;
+  save();
   watch(id);
   return { ok: true, delivery: active ? "queued" : "started", messageId: mid };
 }
@@ -800,6 +1189,10 @@ async function route(req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse
       }
       body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
     }
+    if (req.method === "GET" && url.pathname === "/v1/accounts") {
+      await refreshUsage();
+      return reply(200, { autoSwitch: file.accounts?.autoSwitch === true, accounts: accounts() });
+    }
     if (req.method === "POST" && ["/v1/threads", "/v1/threads/import"].includes(url.pathname)) {
       // polarisd sends absent optional fields as empty strings or null.
       const input = Object.fromEntries(
@@ -810,15 +1203,22 @@ async function route(req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse
       const result = await create(input, url.pathname.endsWith("/import"));
       return reply(result.code, result.body);
     }
-    const match = /^\/v1\/threads\/([^/]+)(?:\/(input|stop|snapshot))?$/.exec(url.pathname);
+    const match = /^\/v1\/threads\/([^/]+)(?:\/(input|stop|snapshot|account))?$/.exec(url.pathname);
     if (!match) return reply(404, { error: "Not found" });
     const id = decodeURIComponent(match[1]!);
     if (!state.threads[id]) return reply(404, { error: "Thread not found" });
     if (req.method === "POST" && match[2] === "input")
-      return reply(
-        200,
-        await input(id, body as { input: string; attachments?: { path: string; name?: string }[] }),
-      );
+      return reply(200, {
+        reply: null,
+        ...(await input(
+          id,
+          body as { input: string; attachments?: { path: string; name?: string }[] },
+        )),
+      });
+    if (req.method === "POST" && match[2] === "account") {
+      if (typeof body.profile !== "string") throw new Refusal("profile is required");
+      return reply(200, await changeAccount(id, body.profile));
+    }
     if (req.method === "POST" && match[2] === "stop") return reply(200, await stop(id));
     if (req.method === "GET" && match[2] === "snapshot") {
       watch(id);
@@ -832,7 +1232,7 @@ async function route(req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse
         provider = serverConfig?.providers.find(
           (v) => v.instanceId === p.thread.providerInstanceId,
         ),
-        pending = pendingRequest(p);
+        pending = pendingRequest(p, state.threads[id]?.answers);
       watch(id);
       return reply(200, {
         threadId: id,
@@ -843,6 +1243,12 @@ async function route(req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse
         turnState: turnState(p),
         model: p.thread.modelSelection.model,
         effort: effort(p),
+        account: (() => {
+          const account = accounts().find((a) => a.id === p.thread.providerInstanceId);
+          return account
+            ? { id: account.id, profile: account.profile, label: account.label }
+            : null;
+        })(),
         worktreePath: p.thread.worktreePath,
         branch: p.thread.branch,
         nativeSessionId: nativeSession(p),
@@ -859,6 +1265,19 @@ async function route(req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse
     return reply(500, { error: String(error) });
   }
 }
+NodeFS.watchFile(configPath, { interval: 2000 }, () => {
+  try {
+    const next = readConfig();
+    accountPlan(next.accounts, process.env.POLARIS_T3_BRIDGE_ALLOW_REPLAY === "1");
+    file = next;
+    if (connected)
+      void provision()
+        .then(() => refreshLinks())
+        .catch(() => log("Account provisioning failed"));
+  } catch {
+    log("Could not reload bridge configuration");
+  }
+});
 const server = NodeHttp.createServer((req, res) => {
   void route(req, res);
 });
@@ -875,6 +1294,7 @@ const sweep = setInterval(() => {
 }, 30_000);
 process.on("SIGTERM", () => {
   clearInterval(sweep);
+  NodeFS.unwatchFile(configPath);
   for (const c of watched.values()) c.abort();
   server.close();
   process.exit(0);
@@ -894,8 +1314,25 @@ async function connect() {
         const c = yield* makeClient();
         client = c;
         serverConfig = yield* c["server.getConfig"]({});
+        yield* Effect.promise(provision);
         connected = true;
         log(`connected to ${origin}`);
+        yield* c["subscribeServerConfig"]({}).pipe(
+          Stream.runForEach((item) =>
+            Effect.promise(async () => {
+              if (!serverConfig) return;
+              const previousOrigin = currentPublicOrigin();
+              if (item.type === "snapshot") serverConfig = item.config;
+              else if (item.type === "providerStatuses")
+                serverConfig = { ...serverConfig, providers: item.payload.providers };
+              else if (item.type === "settingsUpdated")
+                serverConfig = { ...serverConfig, settings: item.payload.settings };
+              const nextOrigin = currentPublicOrigin();
+              if (previousOrigin !== nextOrigin) await refreshLinks();
+            }),
+          ),
+          Effect.forkScoped,
+        );
         const cursor = state.shellCursor;
         if (cursor !== undefined) {
           const snapshot = yield* Effect.promise(

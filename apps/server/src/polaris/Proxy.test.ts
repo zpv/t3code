@@ -1,9 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off -- The fixture serves real HTTP and streaming responses.
 import { describe, expect, it } from "vite-plus/test";
 import * as NodeHttp from "node:http";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ServerHttp from "../http.ts";
+import * as ServerConfig from "../config.ts";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthTerminalOperateScope,
   AuthSessionId,
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
@@ -22,6 +26,7 @@ async function fixture(scopes: ReadonlyArray<AuthEnvironmentScope>, missing = fa
     body: string;
   }> = [];
   const stream = Promise.withResolvers<NodeHttp.ServerResponse>();
+  let authenticationCalls = 0;
   const server = NodeHttp.createServer((req, res) => {
     let body = "";
     req.setEncoding("utf8");
@@ -45,18 +50,22 @@ async function fixture(scopes: ReadonlyArray<AuthEnvironmentScope>, missing = fa
   if (!address || typeof address === "string") throw new Error("No port");
   const origin = `http://127.0.0.1:${address.port}`;
   const { handler, dispose } = HttpRouter.toWebHandler(
-    Proxy.layer.pipe(
+    Layer.merge(Proxy.layer, ServerHttp.layerBrowserApiCors).pipe(
+      Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "polaris-proxy-cors-" })),
+      Layer.provide(NodeServices.layer),
       Layer.provideMerge(
         Layer.succeed(EnvironmentAuth.EnvironmentAuth, {
-          authenticateWebSocketUpgrade: () =>
-            missing
+          authenticateWebSocketUpgrade: () => {
+            authenticationCalls++;
+            return missing
               ? Effect.fail(new EnvironmentAuth.ServerAuthMissingCredentialError({}))
               : Effect.succeed({
                   sessionId: AuthSessionId.make("test"),
                   subject: "test",
                   method: "bearer-access-token",
                   scopes,
-                }),
+                });
+          },
         } as unknown as EnvironmentAuth.EnvironmentAuth["Service"]),
       ),
       Layer.provideMerge(FetchHttpClient.layer),
@@ -69,6 +78,7 @@ async function fixture(scopes: ReadonlyArray<AuthEnvironmentScope>, missing = fa
   return {
     handler,
     requests,
+    authenticationCalls: () => authenticationCalls,
     stream,
     close: async () => {
       await dispose();
@@ -84,7 +94,8 @@ const url = "http://t3.test/api/polaris/proxy";
 describe("Polaris proxy", () => {
   it("enforces authentication and scopes, restricts paths, and strips credentials", async () => {
     const reader = await fixture([AuthOrchestrationReadScope]);
-    const operator = await fixture([AuthOrchestrationOperateScope]);
+    const operator = await fixture([AuthOrchestrationOperateScope, AuthTerminalOperateScope]);
+    const limited = await fixture([AuthOrchestrationOperateScope]);
     const unauthenticated = await fixture([], true);
     try {
       expect((await unauthenticated.handler(new Request(`${url}/v0/runs`))).status).toBe(401);
@@ -92,6 +103,22 @@ describe("Polaris proxy", () => {
         403,
       );
       expect((await operator.handler(new Request(`${url}/v0/runs`))).status).toBe(403);
+      expect(
+        (await limited.handler(new Request(`${url}/v0/runs`, { method: "POST" }))).status,
+      ).toBe(403);
+      const preflight = await unauthenticated.handler(
+        new Request(`${url}/v0/runs`, {
+          method: "OPTIONS",
+          headers: {
+            origin: "https://client.example",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "content-type",
+          },
+        }),
+      );
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get("access-control-allow-origin")).toBe("*");
+      expect(unauthenticated.authenticationCalls()).toBe(1);
       expect((await reader.handler(new Request(`${url}/v1/runs`))).status).toBe(404);
       const response = await reader.handler(
         new Request(`${url}/v0/runs?wsTicket=secret&since=1`, {
@@ -113,17 +140,25 @@ describe("Polaris proxy", () => {
       expect(reader.requests[0]?.headers).not.toHaveProperty("dpop");
       expect(reader.requests[0]?.headers["x-test"]).toBe("retained");
       const changed = await operator.handler(
-        new Request(`${url}/v0/runs`, {
+        new Request(`${url}/v0/runs?wsTicket=secret`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", origin: "https://client.example" },
           body: '{"a":1}',
         }),
       );
       expect(changed.status).toBe(200);
+      expect(changed.headers.get("access-control-allow-origin")).toBe("*");
+      expect(operator.authenticationCalls()).toBe(2);
       await changed.text();
+      expect(operator.requests[0]?.url).toBe("/v0/runs");
       expect(operator.requests[0]?.body).toBe('{"a":1}');
     } finally {
-      await Promise.all([reader.close(), operator.close(), unauthenticated.close()]);
+      await Promise.all([
+        reader.close(),
+        operator.close(),
+        limited.close(),
+        unauthenticated.close(),
+      ]);
     }
   });
 

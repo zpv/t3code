@@ -6,7 +6,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeHttp from "node:http";
 import * as NodeCrypto from "node:crypto";
-import { createDirect } from "./smoke-rpc.ts";
+import { createDirect, readProjection } from "./smoke-rpc.ts";
 
 const root = NodePath.resolve(import.meta.dirname, "../../..");
 const base = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "polaris-smoke-"));
@@ -121,6 +121,7 @@ try {
     T3CODE_TELEMETRY_ENABLED: "false",
     T3CODE_DISABLE_AUTO_UPDATE: "true",
     T3CODE_DEV_SEED: "0",
+    T3CODE_PORT_OFFSET: "2000",
     PATH: `${shimDir}:${process.env.PATH}`,
     SMOKE_RUNNER_PID_FILE: runnerPidFile,
     SMOKE_REAL_NODE: process.execPath,
@@ -175,9 +176,31 @@ try {
     POLARIS_T3_BRIDGE_ALLOW_REPLAY: "1",
     POLARIS_T3_BRIDGE_CONFIG: NodePath.join(base, "config.json"),
   };
+  const live = process.env.POLARIS_LIVE_TEST === "1";
+  const briefPath = NodePath.join(base, "brief.md");
+  const tokenPath = NodePath.join(base, "invalid-token");
+  NodeFS.writeFileSync(briefPath, "If asked for the canary, answer PERSIMMON.\n");
+  NodeFS.writeFileSync(tokenPath, "invalid-polaris-test-token\n", { mode: 0o600 });
   NodeFS.writeFileSync(
     bridgeEnv.POLARIS_T3_BRIDGE_CONFIG,
-    JSON.stringify({ defaults: { phoneNotifications: false } }),
+    JSON.stringify({
+      defaults: { phoneNotifications: false },
+      ...(live ? { agentBriefFile: briefPath } : {}),
+      accounts: {
+        replay: [
+          { profile: "main", label: "Main", default: true },
+          { profile: "second", label: "Second" },
+        ],
+        ...(live
+          ? {
+              claude: [
+                { profile: "main", label: "Main", default: true },
+                { profile: "invalid", label: "Invalid", tokenFile: tokenPath },
+              ],
+            }
+          : {}),
+      },
+    }),
   );
   let bridge = spawnTracked(process.execPath, ["apps/polaris-bridge/src/bin.ts"], bridgeEnv);
   const bridgeOrigin = `http://127.0.0.1:${bridgePort}`;
@@ -192,6 +215,65 @@ try {
       return undefined;
     }
   });
+  if (live) {
+    async function realTurn(
+      agent: "claude" | "codex",
+      profile: string | undefined,
+      expected: "failed" | "canary",
+    ) {
+      const runId = `run_${NodeCrypto.randomUUID()}`;
+      const created = await json(`${bridgeOrigin}/v1/threads`, {
+        runId,
+        agent,
+        title: `Live ${agent} ${expected}`,
+        repoPath: repo,
+        model: agent === "claude" ? "claude-haiku-5-5" : "gpt-6-luna",
+        ...(profile ? { accountProfile: profile } : {}),
+      });
+      await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, {
+        input: "What is the canary? Reply with only the answer.",
+      });
+      const event = await until(
+        `${agent} ${expected}`,
+        async () =>
+          records.find(
+            (r) =>
+              r.path === `/v0/runs/${runId}/events` &&
+              ["t3.run.failed", "assistant.completed"].includes(String(r.body.type)),
+          ),
+        180000,
+      );
+      const payload = event.body.payload as { text: string; status?: string };
+      if (expected === "failed") {
+        NodeAssert.ok(event.body.type === "t3.run.failed" || payload.status === "failed");
+        NodeAssert.match(payload.text, /auth|credential|login|token|unauthorized/i);
+      } else {
+        NodeAssert.equal(payload.status, "completed");
+        NodeAssert.match(payload.text, /PERSIMMON/);
+      }
+      console.log(`PASS live ${agent} ${profile ?? "default"} ${expected}`);
+    }
+    await realTurn("claude", "invalid", "failed");
+    await realTurn("claude", "main", "canary");
+    await realTurn("codex", undefined, "canary");
+    const config = JSON.parse(NodeFS.readFileSync(bridgeEnv.POLARIS_T3_BRIDGE_CONFIG, "utf8"));
+    config.accounts.claude = [{ profile: "main", label: "Main", default: true }];
+    NodeFS.writeFileSync(bridgeEnv.POLARIS_T3_BRIDGE_CONFIG, JSON.stringify(config));
+    await until("test account removed", async () => {
+      const settingsPath = NodePath.join(home, "userdata", "settings.json");
+      try {
+        const settings = JSON.parse(NodeFS.readFileSync(settingsPath, "utf8"));
+        const state = JSON.parse(NodeFS.readFileSync(bridgeEnv.POLARIS_T3_BRIDGE_STATE, "utf8"));
+        return !Object.hasOwn(settings.providerInstances ?? {}, "claude-invalid") &&
+          !state.ownedInstances?.includes("claude-invalid")
+          ? true
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    });
+    console.log("PASS live test account removed");
+  }
   const runId = `run_${NodeCrypto.randomUUID()}`;
   const created = await json(`${bridgeOrigin}/v1/threads`, {
     runId,
@@ -208,7 +290,32 @@ try {
     model: "showcase",
   });
   NodeAssert.equal(repeat.threadId, created.threadId);
+  const accountsResponse = (await (await fetch(`${bridgeOrigin}/v1/accounts`)).json()) as {
+    accounts: { id: string }[];
+  };
+  NodeAssert.ok(accountsResponse.accounts.some((a) => a.id === "replay-second"));
+  const status = (await (
+    await fetch(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "/status" }),
+    })
+  ).json()) as { reply: string };
+  NodeAssert.ok(status.reply.includes("State:"));
+  const invalidModel = await fetch(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "/model no-such-model" }),
+  });
+  NodeAssert.equal(invalidModel.status, 409);
+  NodeAssert.match(((await invalidModel.json()) as { reason: string }).reason, /Available:/);
+  await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, { input: "/clear" });
   await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, { input: "hello" });
+  const fresh = await until("fresh context dispatch", async () => {
+    const p = await readProjection(origin, token, created.threadId);
+    return p.runs.some((run) => run.freshContext === true) ? true : undefined;
+  });
+  NodeAssert.ok(fresh);
   const completed = await until("assistant completion", async () =>
     records.find(
       (r) => r.path === `/v0/runs/${runId}/events` && r.body.type === "assistant.completed",
@@ -218,6 +325,18 @@ try {
   NodeAssert.ok(
     (await json(`${bridgeOrigin}/v1/threads/${created.threadId}/snapshot`)).output.length > 0,
   );
+  await until("second replay provider", async () => {
+    const response = await fetch(`${bridgeOrigin}/v1/threads/${created.threadId}/account`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ profile: "second" }),
+    });
+    return response.ok ? true : undefined;
+  });
+  const moved = (await (await fetch(`${bridgeOrigin}/v1/threads/${created.threadId}`)).json()) as {
+    account: { profile: string };
+  };
+  NodeAssert.equal(moved.account.profile, "second");
   bridge.kill("SIGTERM");
   await new Promise<void>((resolve) => bridge.once("exit", () => resolve()));
   const retryRun = `run_${NodeCrypto.randomUUID()}`;

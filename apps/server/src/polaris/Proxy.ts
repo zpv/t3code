@@ -1,4 +1,8 @@
-import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthTerminalOperateScope,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Config from "effect/Config";
 import * as Option from "effect/Option";
@@ -10,7 +14,7 @@ import {
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/http";
-import { authenticateMediaRequest } from "../auth/http.ts";
+import { authenticateMediaRequest, failEnvironmentScopeRequired } from "../auth/http.ts";
 import { requestUrl } from "../requestUrl.ts";
 
 const prefix = "/api/polaris/proxy";
@@ -35,9 +39,12 @@ function proxyTarget(url: URL, origin: string): string | null {
 
 const handler = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
-  yield* authenticateMediaRequest(
+  if (request.method === "OPTIONS") return HttpServerResponse.empty({ status: 204 });
+  const session = yield* authenticateMediaRequest(
     request.method === "GET" ? AuthOrchestrationReadScope : AuthOrchestrationOperateScope,
   );
+  if (request.method !== "GET" && !session.scopes.includes(AuthTerminalOperateScope))
+    return yield* failEnvironmentScopeRequired(AuthTerminalOperateScope);
   const url = requestUrl(request);
   if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
   const origin = yield* Config.String("POLARIS_SERVER").pipe(

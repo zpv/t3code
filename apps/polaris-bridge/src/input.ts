@@ -7,8 +7,10 @@ export type InputAction =
   | { type: "refuse"; reason: string }
   | { type: "question"; text: string; option: number | null }
   | { type: "approval"; approved: boolean }
-  | { type: "model"; value: string }
-  | { type: "effort"; value: string }
+  | {
+      type: "model" | "effort" | "account" | "status" | "usage" | "context" | "clear";
+      value: string;
+    }
   | { type: "message"; text: string };
 
 export function interpretInput(input: string, pending: PendingRequest | null): InputAction {
@@ -31,8 +33,14 @@ export function interpretInput(input: string, pending: PendingRequest | null): I
     if (/^(y|yes|approve|1)$/i.test(trimmed)) return { type: "approval", approved: true };
     if (/^(n|no|deny|2)$/i.test(trimmed)) return { type: "approval", approved: false };
   }
-  const command = /^\/(model|effort)\s+(.+)$/is.exec(trimmed);
+  const command = /^\/(model|effort|account)(?:\s+(.+))?$/is.exec(trimmed);
   if (command)
-    return { type: command[1] === "model" ? "model" : "effort", value: command[2]!.trim() };
+    return {
+      type: command[1]!.toLowerCase() as "model" | "effort" | "account",
+      value: (command[2] ?? "").trim(),
+    };
+  const query = /^\/(status|usage|context|clear)$/i.exec(trimmed);
+  if (query)
+    return { type: query[1]!.toLowerCase() as "status" | "usage" | "context" | "clear", value: "" };
   return { type: "message", text: input };
 }
