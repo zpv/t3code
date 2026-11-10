@@ -1,3 +1,5 @@
+// polaris-fork: identity import
+import { FORK_IDENTITY } from "@t3tools/shared/remote";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   listLoginShellCandidates,
@@ -123,7 +125,7 @@ export const expandHomePath = Effect.fn(function* (input: string) {
 export const resolveBaseDir = Effect.fn(function* (raw: string | undefined) {
   const { join, resolve } = yield* Path.Path;
   if (!raw || raw.trim().length === 0) {
-    return join(yield* HostProcess.HomeDirectory, ".t3");
+    return join(yield* HostProcess.HomeDirectory, FORK_IDENTITY.home); // polaris-fork: server home
   }
   return resolve(yield* expandHomePath(raw.trim()));
 });

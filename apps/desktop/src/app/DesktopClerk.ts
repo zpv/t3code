@@ -1,3 +1,5 @@
+// polaris-fork: identity import
+import { forkLinkPath } from "@t3tools/shared/remote";
 import { createClerkBridge } from "@clerk/electron";
 import * as NodeURL from "node:url";
 import { storage } from "@clerk/electron/storage";
@@ -210,7 +212,12 @@ export const make = Effect.gen(function* () {
         return true;
       };
       const openAppLink = (value: string | undefined) => {
-        if (!value || (promptLinkAppPath(value) === null && readPairingAppLink(value) === null))
+        if (
+          !value ||
+          (promptLinkAppPath(value) === null &&
+            readPairingAppLink(value) === null &&
+            forkLinkPath(value) === null) /* polaris-fork: deep link dispatch */
+        )
           return false;
         void runPromise(webLinks.receive(value));
         return true;

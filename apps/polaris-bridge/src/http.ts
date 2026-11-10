@@ -24,7 +24,7 @@ type Dependencies = {
   create: (input: Create, importing: boolean) => Promise<{ code: number; body: object }>;
   input: (
     id: string,
-    body: { input: string; attachments?: { path: string; name?: string }[] },
+    body: { input: string; inputId?: string; attachments?: { path: string; name?: string }[] },
   ) => Promise<object>;
   changeAccount: (id: string, profile: string) => Promise<object>;
   stop: (id: string) => Promise<object>;
@@ -68,7 +68,11 @@ export function createRoute(deps: () => Dependencies) {
           t3: { connected, origin, environmentId: serverConfig?.environment.environmentId ?? null },
           polaris: { server: polaris },
         });
-      if (!connected) return reply(503, { error: "T3 is disconnected" });
+      if (
+        !connected &&
+        !(req.method === "POST" && /^\/v1\/threads\/[^/]+\/input$/.test(url.pathname))
+      )
+        return reply(503, { error: "T3 is disconnected" });
       let body: Record<string, unknown> = {};
       if (req.method === "POST") {
         const chunks: Buffer[] = [];
@@ -106,7 +110,11 @@ export function createRoute(deps: () => Dependencies) {
           reply: null,
           ...(await input(
             id,
-            body as { input: string; attachments?: { path: string; name?: string }[] },
+            body as {
+              input: string;
+              inputId?: string;
+              attachments?: { path: string; name?: string }[];
+            },
           )),
         });
       if (req.method === "POST" && match[2] === "account") {
@@ -155,6 +163,7 @@ export function createRoute(deps: () => Dependencies) {
     } catch (error) {
       if (error instanceof Refusal || (error instanceof HttpFailure && error.status === 409))
         return reply(409, { ok: false, reason: error.message });
+      if (!connected) return reply(503, { error: "T3 is disconnected" });
       log(`request failed: ${String(error)}`);
       return reply(500, { error: String(error) });
     }

@@ -1,4 +1,4 @@
-import type { MigrationRow, Project, Run } from "./api";
+import type { BriefRun, MigrationRow, Project, Run } from "./api";
 export function groupRuns(runs: Run[], projects: Project[], search: string, activeOnly: boolean) {
   const query = search.toLowerCase();
   const groups = new Map<string, { name: string; runs: Run[] }>();
@@ -53,4 +53,23 @@ export function migrationCounts(rows: MigrationRow[]) {
     deferred: rows.filter((r) => r.action === "deferred").length,
     skipped: rows.filter((r) => r.action === "skipped").length,
   };
+}
+
+export function visibleBriefRuns(runs: BriefRun[], showAgent: boolean, now: number) {
+  return runs
+    .map((run) => ({
+      ...run,
+      items: (run.items ?? []).filter(
+        (item) =>
+          item.status === "open" &&
+          !item.dismissedAt &&
+          !item.hiddenReason &&
+          (!item.snoozedUntil || Date.parse(item.snoozedUntil) <= now) &&
+          (showAgent || item.owner !== "agent"),
+      ),
+    }))
+    .filter((run) => run.items.length > 0);
+}
+export function qrValue(kind: "thread" | "launcher", threadUrl: string, launcherUrl: string) {
+  return kind === "thread" ? threadUrl : launcherUrl;
 }

@@ -310,12 +310,31 @@ try {
   NodeAssert.equal(invalidModel.status, 409);
   NodeAssert.match(((await invalidModel.json()) as { reason: string }).reason, /Available:/);
   await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, { input: "/clear" });
-  await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, { input: "hello" });
+  const firstInput = await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, {
+    input: "hello",
+    inputId: "smoke-input",
+  });
+  const repeatedInput = await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, {
+    input: "ignored retry",
+    inputId: "smoke-input",
+  });
+  NodeAssert.deepEqual(repeatedInput, firstInput);
   const fresh = await until("fresh context dispatch", async () => {
     const p = await readProjection(origin, token, created.threadId);
     return p.runs.some((run) => run.freshContext === true) ? true : undefined;
   });
   NodeAssert.ok(fresh);
+  const dispatchedProjection = await readProjection(origin, token, created.threadId);
+  NodeAssert.equal(
+    dispatchedProjection.messages.filter(
+      (message) => message.role === "user" && message.text === "hello",
+    ).length,
+    1,
+  );
+  const started = await until("bridge run started", async () =>
+    records.find((r) => r.path === `/v0/runs/${runId}/events` && r.body.type === "t3.run.started"),
+  );
+  NodeAssert.equal((started.body.payload as { origin: string }).origin, "polaris");
   const approval = await until("approval notification", async () =>
     records.find(
       (r) => r.path === `/v0/runs/${runId}/events` && r.body.type === "claude.notification",
@@ -372,6 +391,12 @@ try {
         r.path === `/v0/runs/${questionRun}/events` && r.body.type === "claude.ask_user_question",
     ),
   );
+  const directStarted = await until("direct run started", async () =>
+    records.find(
+      (r) => r.path === `/v0/runs/${questionRun}/events` && r.body.type === "t3.run.started",
+    ),
+  );
+  NodeAssert.equal((directStarted.body.payload as { origin: string }).origin, "t3");
   const questionPayload = question.body.payload as { text: string; options: string[] };
   NodeAssert.match(questionPayload.text, /strict schemas or UI flexibility/i);
   NodeAssert.deepEqual(questionPayload.options, ["Strict schemas (Recommended)", "UI flexibility"]);
@@ -436,6 +461,13 @@ try {
       return undefined;
     }
   });
+  NodeAssert.deepEqual(
+    await json(`${bridgeOrigin}/v1/threads/${created.threadId}/input`, {
+      input: "ignored after restart",
+      inputId: "smoke-input",
+    }),
+    firstInput,
+  );
   const retried = await json(`${bridgeOrigin}/v1/threads`, {
     runId: retryRun,
     agent: "replay",
@@ -465,6 +497,18 @@ try {
     records.find((r) => r.path === "/v0/t3/runs/adopt" && r.body.threadId === direct),
   );
   await pause(1500);
+  for (const run of [runId, questionRun]) {
+    const starts = records.filter(
+      (r) => r.path === `/v0/runs/${run}/events` && r.body.type === "t3.run.started",
+    );
+    NodeAssert.equal(starts.length, 1);
+  }
+  NodeAssert.equal(
+    (await readProjection(origin, token, created.threadId)).messages.filter(
+      (message) => message.role === "user",
+    ).length,
+    1,
+  );
   NodeAssert.equal(
     records.filter(
       (r) => r.path === `/v0/runs/${runId}/events` && r.body.type === "assistant.completed",

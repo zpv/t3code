@@ -3,11 +3,23 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import type { Event } from "./logic.ts";
 import type { PlannedAccount } from "./accounts.ts";
+import type { OrchestrationV2Command } from "@t3tools/contracts";
+
+export type InputReceipt = {
+  createdAt: number;
+  response: object;
+  command?: OrchestrationV2Command;
+  pending?: boolean;
+  event?: Event;
+  refusal?: string;
+};
 
 export type Entry = {
   runId: string;
   events: string[];
   dispatched: string[];
+  inputMessages?: string[];
+  inputs?: Record<string, InputReceipt>;
   cursor?: number;
   state?: string;
   outbox: Event[];

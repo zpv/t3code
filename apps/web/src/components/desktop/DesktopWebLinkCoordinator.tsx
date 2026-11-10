@@ -1,3 +1,5 @@
+// polaris-fork: identity import
+import { forkLinkPath } from "@t3tools/shared/remote";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
@@ -206,7 +208,7 @@ export function DesktopWebLinkCoordinator() {
       await pairFromLink(pairingUrl);
       return;
     }
-    const appPath = promptLinkAppPath(url);
+    const appPath = forkLinkPath(url) ?? promptLinkAppPath(url); // polaris-fork: deep link navigation
     if (appPath !== null) {
       await router.navigate({ href: appPath });
       return;

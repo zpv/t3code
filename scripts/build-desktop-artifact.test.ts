@@ -1,5 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import { checkPolarisApp } from "./check-polaris-app.ts";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -530,14 +533,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       assert.isNull(preview.publish);
       assert.isNull(previewChannel.publish);
-      assert.deepStrictEqual(release.publish, [
-        {
-          provider: "github",
-          owner: "pingdotgg",
-          repo: "t3code",
-          releaseType: "release",
-        },
-      ]);
+      assert.isNull(release.publish);
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
@@ -1445,7 +1441,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code",
+      appId: "sh.zpv.polaris.t3",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -1468,7 +1464,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
+    assert.include(entitlements, "<string>ABC1234567.sh.zpv.polaris.t3</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
@@ -1854,4 +1850,26 @@ it.effect.skipIf(!symlinksSupported)("preserves relative links when replacing di
     assert.equal(yield* fs.readLink(path.join(output, app, "Current")), "New.plist");
     assert.equal(yield* fs.readFileString(path.join(output, app, "Current")), "rebuilt-app");
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("checks the packaged macOS identity and protocol", () =>
+  Effect.gen(function* () {
+    if ((yield* HostProcess.Platform) !== "darwin") return;
+    const app = (yield* HostProcess.Environment).POLARIS_APP_PATH;
+    if (app) {
+      checkPolarisApp(app);
+      return;
+    }
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "polaris-plist-"));
+    try {
+      NodeFS.mkdirSync(NodePath.join(directory, "Contents"));
+      NodeFS.writeFileSync(
+        NodePath.join(directory, "Contents/Info.plist"),
+        `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>sh.zpv.polaris.t3</string><key>CFBundleName</key><string>Polaris</string><key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>polaris-t3</string></array></dict></array></dict></plist>`,
+      );
+      checkPolarisApp(directory);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true });
+    }
+  }),
 );

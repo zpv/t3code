@@ -29,6 +29,13 @@ const makeAccessAtom = () =>
   );
 const accessAtom = makeAccessAtom();
 const requestAccessAtom = makeAccessAtom();
+export function readPolarisAccess(id: EnvironmentId): Promise<PolarisAccess> {
+  return Effect.runPromise(
+    AtomRegistry.getResult(appAtomRegistry, requestAccessAtom(id), { suspendOnWaiting: true }).pipe(
+      Effect.timeout("10 seconds"),
+    ),
+  );
+}
 const emptyAtom = Atom.make(AsyncResult.initial<PolarisAccess, never>());
 export function usePolarisAccess(id: EnvironmentId | null) {
   const result = useAtomValue(id ? accessAtom(id) : emptyAtom);

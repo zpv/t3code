@@ -11,6 +11,7 @@ import {
   type ChatAttachment,
   type ServerConfig,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import type { Account } from "./accounts.ts";
 import { chooseAccount } from "./accounts.ts";
@@ -20,6 +21,7 @@ import type { Client } from "./t3Client.ts";
 import { Refusal } from "./t3Client.ts";
 import { pendingRequest, resolveModel, effortOption, formatReply, type Event } from "./logic.ts";
 import { turnState, effort } from "./threads.ts";
+import { createInputReceipts } from "./inputReceipts.ts";
 export type PendingRequest =
   | { kind: "question"; options: readonly string[] }
   | { kind: "approval" };
@@ -172,6 +174,7 @@ export function createInputService(ctx: InputContext) {
     resetAt?: string,
     moveCommandId?: string,
     suppressEvent = false,
+    send?: (command: OrchestrationV2Command, response: object, event?: Event) => Promise<object>,
   ) {
     const { file, serverConfig } = ctx;
     const p = await projection(id);
@@ -205,37 +208,52 @@ export function createInputService(ctx: InputContext) {
       save();
     }
     if (from.id !== target.id) {
-      await Effect.runPromise(
-        requireClient()["orchestration.dispatchCommand"]({
-          type: "thread.model-selection.set",
-          commandId: moveCommandId ? CommandId.make(moveCommandId) : commandId(),
-          threadId: threadId(id),
-          modelSelection: { instanceId: ProviderInstanceId.make(target.id), model },
-        }),
-      );
       const entry = state.threads[id];
-      if (entry && !suppressEvent) {
-        const event: Event = {
-          eventId: `t3:${id}:account:${NodeCrypto.randomUUID()}`,
-          type: "t3.account.switched",
-          source: "t3-bridge",
-          payload: {
-            text:
-              reason === "usage_limit"
-                ? `${from.label} hit its limit${resetAt ? ` (resets ${resetAt})` : ""}. Continuing on ${target.label}.`
-                : `${from.label} account changed to ${target.label}.`,
-            from: from.profile,
-            to: target.profile,
-            reason,
-            resume,
-            link: link(id),
+      const event: Event | undefined =
+        entry && !suppressEvent
+          ? {
+              eventId: `t3:${id}:account:${NodeCrypto.randomUUID()}`,
+              type: "t3.account.switched",
+              source: "t3-bridge",
+              payload: {
+                text:
+                  reason === "usage_limit"
+                    ? `${from.label} hit its limit${resetAt ? ` (resets ${resetAt})` : ""}. Continuing on ${target.label}.`
+                    : `${from.label} account changed to ${target.label}.`,
+                from: from.profile,
+                to: target.profile,
+                reason,
+                resume,
+                link: link(id),
+              },
+            }
+          : undefined;
+      const command = {
+        type: "thread.model-selection.set" as const,
+        commandId: moveCommandId ? CommandId.make(moveCommandId) : commandId(),
+        threadId: threadId(id),
+        modelSelection: { instanceId: ProviderInstanceId.make(target.id), model },
+      };
+      if (send) {
+        await send(
+          command,
+          {
+            ok: true,
+            delivery: "configured",
+            messageId: null,
+            reply: formatReply(`Account: ${target.label} (${resume})`),
           },
-        };
+          event,
+        );
+      } else {
+        await Effect.runPromise(requireClient()["orchestration.dispatchCommand"](command));
+      }
+      if (entry && event && !send) {
         entry.events.push(event.eventId);
         entry.outbox.push(event);
         save();
-        if (flushChanges) await flush(id, await projection(id));
       }
+      if (entry && event && flushChanges) await flush(id, await projection(id));
     }
     return {
       ok: true,
@@ -243,9 +261,14 @@ export function createInputService(ctx: InputContext) {
       resume,
     };
   }
-  async function input(
+  const withReceipt = createInputReceipts(state, save, (command) =>
+    Effect.runPromise(requireClient()["orchestration.dispatchCommand"](command)),
+  );
+  async function inputOnce(
     id: string,
     body: { input: string; attachments?: { path: string; name?: string }[] },
+    send: (command: OrchestrationV2Command, response: object, event?: Event) => Promise<object>,
+    record: (response: object) => void,
   ) {
     const { serverConfig } = ctx;
     if (typeof body.input !== "string") throw new Refusal("input must be a string");
@@ -253,22 +276,21 @@ export function createInputService(ctx: InputContext) {
       pending = pendingRequest(p, state.threads[id]?.answers);
     const action = interpretInput(body.input, pending);
     const thread = threadId(id),
-      c = requireClient(),
       active = p.runs.findLast((r) =>
         ["preparing", "starting", "running", "waiting"].includes(r.status),
       );
     if (action.type === "refuse") throw new Refusal(action.reason);
     if (action.type === "interrupt") {
       if (!active) return { ok: true, delivery: "idle", messageId: null };
-      await Effect.runPromise(
-        c["orchestration.dispatchCommand"]({
+      return send(
+        {
           type: "run.interrupt",
           commandId: commandId(),
           threadId: thread,
           runId: active.id,
-        }),
+        },
+        { ok: true, delivery: "interrupted", messageId: null },
       );
-      return { ok: true, delivery: "interrupted", messageId: null };
     }
     if (action.type === "question" && pending?.kind === "question") {
       const answer =
@@ -283,35 +305,36 @@ export function createInputService(ctx: InputContext) {
         [pending.question.id]: answer,
       };
       if (pending.questions.every((question) => question.id in values)) {
-        await Effect.runPromise(
-          c["orchestration.dispatchCommand"]({
+        delete entry.answers;
+        return send(
+          {
             type: "runtime-request.respond",
             commandId: commandId(),
             threadId: thread,
             requestId: pending.id,
             answers: values,
-          }),
+          },
+          { ok: true, delivery: "answered", messageId: null },
         );
-        delete entry.answers;
-        save();
       } else {
         entry.answers = { requestId: pending.id, values };
+        record({ ok: true, delivery: "answered", messageId: null });
         save();
         await flush(id, p);
       }
       return { ok: true, delivery: "answered", messageId: null };
     }
     if (action.type === "approval" && pending) {
-      await Effect.runPromise(
-        c["orchestration.dispatchCommand"]({
+      return send(
+        {
           type: "runtime-request.respond",
           commandId: commandId(),
           threadId: thread,
           requestId: pending.id,
           decision: action.approved ? "accept" : "decline",
-        }),
+        },
+        { ok: true, delivery: "answered", messageId: null },
       );
-      return { ok: true, delivery: "answered", messageId: null };
     }
     if (action.type === "account") {
       const current = accounts().find((a) => a.id === p.thread.providerInstanceId);
@@ -328,7 +351,16 @@ export function createInputService(ctx: InputContext) {
               .join(", ")}`,
           ),
         };
-      const changed = await changeAccount(id, action.value);
+      const changed = await changeAccount(
+        id,
+        action.value,
+        "manual",
+        true,
+        undefined,
+        undefined,
+        false,
+        send,
+      );
       return {
         ok: true,
         delivery: "configured",
@@ -358,6 +390,12 @@ export function createInputService(ctx: InputContext) {
       const entry = state.threads[id];
       if (!entry) throw new Refusal("Thread is not mapped");
       entry.freshContext = true;
+      record({
+        ok: true,
+        delivery: "configured",
+        messageId: null,
+        reply: "The next message starts a fresh session.",
+      });
       save();
       return {
         ok: true,
@@ -440,8 +478,8 @@ export function createInputService(ctx: InputContext) {
                 descriptor.options.some((choice) => choice.id === o.value)
               );
             });
-      await Effect.runPromise(
-        c["orchestration.dispatchCommand"]({
+      return send(
+        {
           type: "thread.model-selection.set",
           commandId: commandId(),
           threadId: thread,
@@ -450,9 +488,9 @@ export function createInputService(ctx: InputContext) {
             model,
             ...(options.length ? { options } : {}),
           },
-        }),
+        },
+        { ok: true, delivery: "configured", messageId: null },
       );
-      return { ok: true, delivery: "configured", messageId: null };
     }
     if (action.type !== "message") throw new Refusal("Cannot answer this request");
     const attachments = await upload(body.attachments ?? []);
@@ -460,9 +498,11 @@ export function createInputService(ctx: InputContext) {
     const entry = state.threads[id];
     if (!entry) throw new Refusal("Thread is not mapped");
     entry.dispatched.push(mid);
-    save();
-    await Effect.runPromise(
-      c["orchestration.dispatchCommand"]({
+    (entry.inputMessages ??= []).push(mid);
+    const freshContext = entry.freshContext;
+    delete entry.freshContext;
+    const result = await send(
+      {
         type: "message.dispatch",
         commandId: commandId(),
         threadId: thread,
@@ -472,13 +512,19 @@ export function createInputService(ctx: InputContext) {
         dispatchMode: { type: active ? "queue_after_active" : "start_immediately" },
         createdBy: "user",
         creationSource: "server",
-        ...(entry.freshContext ? { freshContext: true } : {}),
-      }),
+        ...(freshContext ? { freshContext: true } : {}),
+      },
+      { ok: true, delivery: active ? "queued" : "started", messageId: mid },
     );
-    delete entry.freshContext;
-    save();
     watch(id);
-    return { ok: true, delivery: active ? "queued" : "started", messageId: mid };
+    return result;
+  }
+
+  async function input(
+    id: string,
+    body: { input: string; inputId?: string; attachments?: { path: string; name?: string }[] },
+  ) {
+    return withReceipt(id, body.inputId, (send, record) => inputOnce(id, body, send, record));
   }
 
   return { input, changeAccount };

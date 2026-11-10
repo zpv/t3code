@@ -7,6 +7,7 @@ export interface Run {
   agent: string;
   backend?: string;
   projectId?: string;
+  workspaceId?: string;
   status: string;
   turnState?: string;
   model?: string;
@@ -19,6 +20,32 @@ export interface Run {
 export interface Project {
   id: string;
   name: string;
+  defaultBranch?: string;
+}
+export interface BriefItem {
+  id: string;
+  title: string;
+  owner: string;
+  status: string;
+  quote: string;
+  createdAt: string;
+  dismissedAt?: string;
+  snoozedUntil?: string;
+  hiddenReason?: string;
+}
+export interface BriefRun {
+  runId: string;
+  name: string;
+  state: string;
+  headline: string;
+  summary: string;
+  items: BriefItem[];
+}
+export interface BriefData {
+  enabled: boolean;
+  providerRetryAt?: string;
+  providerIssue?: string;
+  runs: BriefRun[];
 }
 export interface Port {
   id: string;

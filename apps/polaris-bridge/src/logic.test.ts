@@ -44,7 +44,7 @@ describe("bridge projection logic", () => {
         { role: "assistant", runId: "r", text: "first" },
         { role: "assistant", runId: "r", text: "last" },
       ],
-      runs: [{ id: "r", status: "completed" }],
+      runs: [{ id: "r", status: "completed", userMessageId: "mine" }],
       runtimeRequests: [{ id: "q", status: "pending" }],
       turnItems: [
         {
@@ -54,16 +54,22 @@ describe("bridge projection logic", () => {
         },
       ],
     });
-    const events = deriveEvents(p, { events: [], dispatched: ["mine"] });
+    const events = deriveEvents(p, { events: [], dispatched: ["mine"], inputMessages: ["mine"] });
     expect(events.map((e) => e.type)).toEqual([
       "user.prompt",
+      "t3.run.started",
       "assistant.completed",
       "claude.ask_user_question",
     ]);
-    expect(events[1]?.payload.text).toBe("last");
-    expect(events[2]?.payload.text).toBe("Which?\n1. A");
+    expect(events[1]?.payload.origin).toBe("polaris");
+    expect(events[2]?.payload.text).toBe("last");
+    expect(events[3]?.payload.text).toBe("Which?\n1. A");
     const saved = JSON.parse(
-      JSON.stringify({ events: events.map((event) => event.eventId), dispatched: ["mine"] }),
+      JSON.stringify({
+        events: events.map((event) => event.eventId),
+        dispatched: ["mine"],
+        inputMessages: ["mine"],
+      }),
     );
     expect(deriveEvents(p, saved)).toEqual([]);
     const approval = projection({
@@ -73,6 +79,33 @@ describe("bridge projection logic", () => {
     });
     expect(pendingRequest(approval)?.kind).toBe("approval");
     expect(deriveEvents(approval, saved).at(-1)?.type).toBe("claude.notification");
+  });
+  it("emits a run start only once after queued work starts, with its originating surface", () => {
+    const p = projection({
+      thread: { id: "thread" },
+      messages: [],
+      runtimeRequests: [],
+      turnItems: [],
+      runs: [
+        { id: "one", status: "queued", userMessageId: "bridge" },
+        { id: "two", status: "running", userMessageId: "ui" },
+      ],
+    });
+    const marks = { events: [], dispatched: ["bridge"], inputMessages: ["bridge"] };
+    const first = deriveEvents(p, marks);
+    expect(first.map((e) => [e.eventId, e.payload.origin])).toEqual([
+      ["t3:thread:run:two:started", "t3"],
+    ]);
+    const next = deriveEvents(
+      projection({ ...p, runs: [{ id: "one", status: "running", userMessageId: "bridge" }] }),
+      { ...marks, events: first.map((e) => e.eventId) },
+    );
+    expect(next.map((e) => [e.eventId, e.payload.origin])).toEqual([
+      ["t3:thread:run:one:started", "polaris"],
+    ]);
+    expect(
+      deriveEvents(p, { ...marks, events: [...first, ...next].map((e) => e.eventId) }),
+    ).toEqual([]);
   });
   it("replays a pending request even when the current projection is already resolved", () => {
     const p = projection({

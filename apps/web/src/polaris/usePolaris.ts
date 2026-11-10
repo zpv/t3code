@@ -4,6 +4,7 @@ import { withDeviceHubQuery } from "@t3tools/client-runtime/state/deviceHubAcces
 import {
   EventParser,
   request,
+  type BriefData,
   type Bridge,
   type Lease,
   type Port,
@@ -21,6 +22,7 @@ export interface Data {
   leases: Lease[];
   streams: Stream[];
   bridges: Bridge[];
+  brief: BriefData;
 }
 const paths = {
   runs: "/v0/runs",
@@ -30,6 +32,7 @@ const paths = {
   leases: "/v0/devices/simulators/leases",
   streams: "/v0/devices/simulator-streams",
   bridges: "/v0/discord/bridges",
+  brief: "/v0/brief",
 } as const;
 type Collection = keyof Data;
 function streamReader(response: Response) {
@@ -58,7 +61,7 @@ export function usePolaris(access: PolarisAccess | null) {
             const result = await request<Record<string, unknown>>(access, paths[key], {
               signal: controller.signal,
             });
-            return [key, result[key] ?? []] as const;
+            return [key, key === "brief" ? result : (result[key] ?? [])] as const;
           }),
         );
         if (!controller.signal.aborted) {
@@ -75,6 +78,7 @@ export function usePolaris(access: PolarisAccess | null) {
                     leases: [],
                     streams: [],
                     bridges: [],
+                    brief: { enabled: false, runs: [] },
                   }),
               ...Object.fromEntries(pairs),
             } as Data,
@@ -91,14 +95,15 @@ export function usePolaris(access: PolarisAccess | null) {
     };
     const all = () => void refresh(Object.keys(paths) as Collection[]);
     const onEvent = (type: string) => {
-      const key: Collection[] =
-        type.startsWith("run.") ||
-        type.startsWith("session.") ||
-        type.startsWith("assistant.") ||
-        type.startsWith("pane.") ||
-        type.startsWith("tmux.") ||
-        type.startsWith("claude.") ||
-        type.startsWith("user.")
+      const key: Collection[] = type.startsWith("brief.")
+        ? ["brief"]
+        : type.startsWith("run.") ||
+            type.startsWith("session.") ||
+            type.startsWith("assistant.") ||
+            type.startsWith("pane.") ||
+            type.startsWith("tmux.") ||
+            type.startsWith("claude.") ||
+            type.startsWith("user.")
           ? ["runs"]
           : type.startsWith("port.")
             ? ["ports"]

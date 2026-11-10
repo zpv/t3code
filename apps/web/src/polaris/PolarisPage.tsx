@@ -1,11 +1,11 @@
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { useNavigate, useLocation } from "@tanstack/react-router";
-import { ChevronDownIcon, RefreshCwIcon, XIcon } from "lucide-react";
+import { ChevronDownIcon, MoreHorizontalIcon, RefreshCwIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Button, InlineButton } from "~/components/ui/button";
 import { DialogBackdrop } from "~/components/ui/dialog";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
+import { Menu, MenuCheckboxItem, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Toggle, ToggleGroup } from "~/components/ui/toggle-group";
@@ -23,10 +23,13 @@ import { usePolarisAccess } from "./state";
 import { usePolaris } from "./usePolaris";
 import { Runs } from "./Runs";
 import { Resources, Devices } from "./Resources";
+import { Brief } from "./Brief";
+import { playSound, useSoundSettings } from "./sound";
 import { MigrationDialog } from "./MigrationDialog";
 
 export function PolarisPage() {
   const navigate = useNavigate();
+  const sound = useSoundSettings();
   const [background] = useState(() => {
     const pathname = (sessionStorage.getItem("polaris-return") ?? "").split("?")[0] ?? "";
     const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
@@ -43,7 +46,7 @@ export function PolarisPage() {
   const access = usePolarisAccess(id);
   const { data, error, refresh } = usePolaris(access);
   const params = new URLSearchParams(location.searchStr);
-  const tab = ["runs", "resources", "devices"].includes(params.get("tab") ?? "")
+  const tab = ["runs", "resources", "devices", "brief"].includes(params.get("tab") ?? "")
     ? params.get("tab")!
     : "runs";
   const [migration, setMigration] = useState<string | null | false>(() =>
@@ -125,12 +128,34 @@ export function PolarisPage() {
                     if (next[0]) selectTab(next[0]);
                   }}
                 >
-                  {["runs", "resources", "devices"].map((value) => (
+                  {["runs", "resources", "devices", "brief"].map((value) => (
                     <Toggle key={value} value={value}>
                       {value[0]!.toUpperCase() + value.slice(1)}
                     </Toggle>
                   ))}
                 </ToggleGroup>
+                <Menu>
+                  <MenuTrigger
+                    render={<Button variant="ghost" size="icon-sm" aria-label="Polaris settings" />}
+                  >
+                    <MoreHorizontalIcon />
+                  </MenuTrigger>
+                  <MenuPopup align="end">
+                    <MenuCheckboxItem checked={sound.enabled} onCheckedChange={sound.setEnabled}>
+                      Completion sound
+                    </MenuCheckboxItem>
+                    {[1, 2, 3].map((volume) => (
+                      <MenuCheckboxItem
+                        key={volume}
+                        checked={sound.volume === volume}
+                        onCheckedChange={() => sound.setVolume(volume)}
+                      >
+                        Volume {volume}
+                      </MenuCheckboxItem>
+                    ))}
+                    <MenuItem onClick={() => playSound("completion", true)}>Test sound</MenuItem>
+                  </MenuPopup>
+                </Menu>
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -186,8 +211,16 @@ export function PolarisPage() {
                         />
                       ) : tab === "resources" ? (
                         <Resources data={data} access={access} refresh={refresh} onRun={openRun} />
-                      ) : (
+                      ) : tab === "devices" ? (
                         <Devices data={data} access={access} refresh={refresh} onRun={openRun} />
+                      ) : (
+                        <Brief
+                          brief={data.brief}
+                          data={data}
+                          access={access}
+                          refresh={refresh}
+                          onRun={openRun}
+                        />
                       )}
                     </div>
                   )}

@@ -24,7 +24,9 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { toastManager } from "~/components/ui/toast";
 import { post, request, type Run } from "./api";
 import { mutate, relativeTime } from "./actions";
-import { groupRuns, runState } from "./logic";
+import { groupRuns, runState, qrValue } from "./logic";
+import { CloseWorkspaceDialog } from "./CloseWorkspaceDialog";
+import { QrDialog } from "./QrDialog";
 import type { Data } from "./usePolaris";
 
 export function Runs({
@@ -117,6 +119,10 @@ function RunRow({
   refresh: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [qr, setQr] = useState<string | null>(null);
+  const [link, setLink] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const navigate = useNavigate();
   const state = runState(run);
   const bridge = data.bridges.find((b) => b.runId === run.id && b.threadId && b.guildId);
@@ -138,6 +144,43 @@ function RunRow({
       kind: "link",
       url: new URL(threadHref, window.location.origin).href,
     });
+  const threadUrl = new URL(threadHref, window.location.origin).href;
+  const launcher = async (action: "send" | "open" | "qr") => {
+    try {
+      const result = await post<{ launcher: { publicUrl: string | null; deepLink: string } }>(
+        access,
+        "/v0/dev-client/launcher",
+        { workspaceId: run.workspaceId },
+      );
+      if (action === "open") setLink(result.launcher.deepLink);
+      else if (!result.launcher.publicUrl)
+        toastManager.add({
+          type: "error",
+          title: "Could not create launcher",
+          description: "No public launcher URL is configured.",
+        });
+      else if (action === "qr") setQr(qrValue("launcher", threadUrl, result.launcher.publicUrl));
+      else {
+        await post(access, "/v0/notifications/phone", {
+          kind: "metro",
+          url: result.launcher.publicUrl,
+        });
+        toastManager.add({ type: "success", title: "Metro opener sent to phone" });
+      }
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Could not create launcher",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const restoreFocus = () => {
+    setClosing(false);
+    setQr(null);
+    setLink(null);
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  };
   const copy = () =>
     void navigator.clipboard
       .writeText(run.id)
@@ -254,7 +297,12 @@ function RunRow({
         <Menu>
           <MenuTrigger
             render={
-              <Button variant="ghost" size="icon-xs" aria-label={`Actions for ${run.name}`} />
+              <Button
+                ref={triggerRef}
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Actions for ${run.name}`}
+              />
             }
           >
             <MoreHorizontalIcon />
@@ -263,6 +311,9 @@ function RunRow({
             {run.backend === "t3" && run.t3ThreadId ? (
               <>
                 <MenuItem onClick={open}>Open thread</MenuItem>
+                <MenuItem onClick={() => setQr(qrValue("thread", threadUrl, ""))}>
+                  Show thread QR code
+                </MenuItem>
                 <MenuItem onClick={phone}>
                   <SmartphoneIcon />
                   Send link to phone
@@ -277,6 +328,16 @@ function RunRow({
             {run.backend !== "t3" && (run.agent === "claude" || run.agent === "codex") ? (
               <MenuItem onClick={() => onMigrate(run.id)}>Move to T3</MenuItem>
             ) : null}
+            {run.workspaceId ? (
+              <>
+                <MenuItem onClick={() => setClosing(true)}>Close workspace…</MenuItem>
+                <MenuItem onClick={() => void launcher("send")}>
+                  Send Metro opener to phone
+                </MenuItem>
+                <MenuItem onClick={() => void launcher("open")}>Open dev client on iPhone</MenuItem>
+                <MenuItem onClick={() => void launcher("qr")}>Show launcher QR code</MenuItem>
+              </>
+            ) : null}
             <MenuItem onClick={copy}>
               <CopyIcon />
               Copy run ID
@@ -284,6 +345,17 @@ function RunRow({
           </MenuPopup>
         </Menu>
       </div>
+      {closing ? (
+        <CloseWorkspaceDialog
+          run={run}
+          project={data.projects.find((p) => p.id === run.projectId)}
+          access={access}
+          onClose={restoreFocus}
+          refresh={refresh}
+        />
+      ) : null}
+      {qr ? <QrDialog url={qr} onClose={restoreFocus} /> : null}
+      {link ? <QrDialog url={link} onClose={restoreFocus} /> : null}
       {expanded && run.agent === "shell" ? <Peek run={run} access={access} /> : null}
     </>
   );

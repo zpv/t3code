@@ -17,6 +17,7 @@ export type Event = {
 export type Marks = {
   events: string[];
   dispatched: string[];
+  inputMessages?: string[];
   answers?: { requestId: string; values: Record<string, string> };
 };
 

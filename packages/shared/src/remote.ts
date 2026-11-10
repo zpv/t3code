@@ -1,10 +1,13 @@
+// polaris-fork: identity import
+import { FORK_IDENTITY } from "./forkIdentity.ts";
+export { FORK_IDENTITY, forkLinkPath } from "./forkIdentity.ts"; // polaris-fork: identity exports
 import * as Schema from "effect/Schema";
 
 const PAIRING_TOKEN_PARAM = "token";
 const HOSTED_PAIRING_HOST_PARAM = "host";
 const HOSTED_PAIRING_LABEL_PARAM = "label";
 const PAIRING_APP_LINK_PARAM = "pairingUrl";
-const APP_LINK_PROTOCOL = /^t3code(?:-[a-z]+)?:$/;
+const APP_LINK_PROTOCOL = /^(?:t3code(?:-[a-z]+)?|polaris-t3(?:-dev)?):$/; // polaris-fork: pairing protocols
 const SUPPORTED_REMOTE_BACKEND_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 
 export const readHashParams = (url: URL): URLSearchParams =>
@@ -189,7 +192,7 @@ export const readHostedPairingRequest = (url: URL): HostedPairingRequest | null 
 
 /** Wraps a pairing URL in the `t3code://pair` link that desktop opens and mobile scans. */
 export const buildPairingAppLink = (pairingUrl: string): string =>
-  `t3code://pair?${new URLSearchParams([[PAIRING_APP_LINK_PARAM, pairingUrl]])}`;
+  `${FORK_IDENTITY.scheme}://pair?${new URLSearchParams([[PAIRING_APP_LINK_PARAM, pairingUrl]])}`; // polaris-fork: pairing scheme
 
 /** Reads the pairing URL from a `t3code://pair` link on any app channel scheme. */
 export const readPairingAppLink = (value: string): string | null => {

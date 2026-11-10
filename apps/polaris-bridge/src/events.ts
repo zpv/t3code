@@ -34,6 +34,11 @@ export function deriveEvents(p: Projection, marks: Marks): Event[] {
         origin: "t3",
       });
   for (const run of p.runs) {
+    if (run.status !== "queued" && (run.status !== "cancelled" || run.startedAt))
+      add(`run:${run.id}:started`, "t3.run.started", {
+        t3RunId: run.id,
+        origin: marks.inputMessages?.includes(run.userMessageId) ? "polaris" : "t3",
+      });
     if (!["completed", "interrupted", "failed", "cancelled"].includes(run.status)) continue;
     const last = p.messages
       .filter((message) => message.role === "assistant" && message.runId === run.id)
@@ -299,8 +304,8 @@ export function createEventService(ctx: EventContext) {
       const event = entry.outbox[0]!;
       log(`event ${entry.runId} ${event.type}`);
       const result = await postPolaris(`/v0/runs/${encodeURIComponent(entry.runId)}/events`, event);
+      if (!result) throw new Error("Event was not acknowledged");
       if (
-        result &&
         ctx.file.defaults?.phoneNotifications !== false &&
         ["assistant.completed", "claude.ask_user_question", "claude.notification"].includes(
           event.type,

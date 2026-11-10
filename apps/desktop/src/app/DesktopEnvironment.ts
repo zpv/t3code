@@ -1,3 +1,5 @@
+// polaris-fork: identity import
+import { FORK_IDENTITY } from "@t3tools/shared/remote";
 import type {
   DesktopAppBranding,
   DesktopAppStageLabel,
@@ -85,7 +87,7 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "T3 Code";
+const APP_BASE_NAME = FORK_IDENTITY.productName; // polaris-fork: app name
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -159,7 +161,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const baseDir = resolveDesktopBaseDir({
     homeDirectory,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    t3Home: Option.orElse(config.t3Home, () =>
+      Option.some(path.join(homeDirectory, FORK_IDENTITY.home)),
+    ), // polaris-fork: desktop home
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -227,8 +231,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
     otlpProtocol: config.otlpProtocol,
     branding,
     displayName,
-    appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+    appUserModelId: Option.getOrElse(
+      config.appUserModelIdOverride,
+      () => (isDevelopment ? FORK_IDENTITY.devAppId : FORK_IDENTITY.appId), // polaris-fork: app model id
     ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
     linuxApplicationsDir,

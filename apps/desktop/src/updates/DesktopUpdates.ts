@@ -1,3 +1,6 @@
+import * as Config from "effect/Config";
+// polaris-fork: identity import
+import { FORK_IDENTITY } from "@t3tools/shared/remote";
 import {
   DESKTOP_UPDATE_RESTART_MARKER_FILE,
   DesktopUpdateChannelSchema,
@@ -469,7 +472,10 @@ export const make = Effect.gen(function* () {
         platform: environment.platform,
         appImage: Option.getOrUndefined(config.appImagePath),
         isDebPackage,
-        disabledByEnv: config.disableAutoUpdate,
+        disabledByEnv: yield* Config.Boolean("T3CODE_DISABLE_AUTO_UPDATE").pipe(
+          Config.withDefault(!FORK_IDENTITY.autoUpdateEnabled),
+          Effect.orElseSucceed(() => !FORK_IDENTITY.autoUpdateEnabled),
+        ), // polaris-fork: update default
         hasUpdateFeedConfig: hasFeedConfig,
       }),
     );

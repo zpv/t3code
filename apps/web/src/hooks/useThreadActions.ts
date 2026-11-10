@@ -52,6 +52,7 @@ import { useRightPanelStore } from "../rightPanelStore";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
+import { guardWorktree } from "../polaris/worktree"; // polaris-fork: worktree guard import
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
@@ -511,6 +512,7 @@ export function useThreadActions() {
       survivingThreads,
       threadRef.threadId,
     );
+    orphanedWorktreePath = await guardWorktree(orphanedWorktreePath, threadRef.environmentId, environmentConfig); // polaris-fork: worktree guard
     // A shell that leaves idle subagent children out cannot prove nobody else uses the worktree,
     // so the server's list decides. A failed read keeps the worktree.
     if (orphanedWorktreePath !== null && environmentConfig?.shellThreadFamilies === true) {
