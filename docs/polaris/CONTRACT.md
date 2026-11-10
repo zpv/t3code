@@ -81,7 +81,8 @@ Idempotent on `runId`; `created` is false when the thread already existed.
 
 ### `POST /v1/threads/{threadId}/input`
 
-Request: `{"input": string, "mode": "task"|"raw", "attachments": [{"path": "/abs/file", "name": "optional"}]}`.
+Request: `{"input": string, "mode": "task"|"raw", "attachments": [{"path": "/abs/file", "name": "optional"}], "inputId": "optional idempotency key"}`.
+When `inputId` is given, a repeat with the same `inputId` for the same thread performs nothing and returns the original response; the bridge remembers keys durably for at least 7 days. `polarisd` uses this to retry safely and to deliver input it queued while the bridge was unreachable.
 `mode` defaults to `"task"`; `attachments` is optional (host paths; the bridge uploads
 images and files to T3 as real attachments).
 
@@ -185,6 +186,7 @@ so far, and one line per tool action (`⏺ Bash: <command>`, `⏺ Edit: <path>`,
 
 | `type`                     | When                                                                                                                            | `payload`                                                                                                                                         |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `t3.run.started`           | A run starts in the thread, whichever surface sent the message                                                                  | `{"t3RunId", "origin": "polaris" or "t3"}`; `origin` is `polaris` when the message came through the bridge `input` endpoint                       |
 | `user.prompt`              | A user message appears in the thread that did **not** come through the bridge's `input` endpoint (typed in the T3 UI or mobile) | `{"text", "messageId", "origin": "t3"}`                                                                                                           |
 | `assistant.completed`      | A run reaches a terminal state with a final assistant message                                                                   | `{"text", "t3RunId", "status": "completed                                                                                                         | interrupted | failed"}` |
 | `claude.ask_user_question` | A question becomes pending                                                                                                      | `{"text", "requestId", "options": ["..."], "notification_type": "ask_user_question"}`; `text` is the question followed by a numbered option list  |
